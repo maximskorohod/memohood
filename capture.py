@@ -424,10 +424,13 @@ def _store_capture(
     pinned: bool,
     session_id: str,
     cfg: Dict[str, Any],
+    force_supersede_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run the step-4 supersede classifier against *content*, then either
     touch an existing duplicate or insert a new row (independent, or
     superseding an old one) with FTS + (best-effort) vec indexing.
+    *force_supersede_id* (an active capture id) skips the classifier and
+    supersedes that row -- used for an explicit memory-tool ``replace``.
 
     Returns ``{"action": "duplicate"|"supersede"|"independent",
     "capture_id": str, "supersedes": str|None}``.
@@ -443,7 +446,10 @@ def _store_capture(
     action = "independent"
     supersedes_id: Optional[str] = None
     top = candidates[0] if candidates else None
-    if top is not None:
+    if force_supersede_id and _filter_active(conn, [force_supersede_id]):
+        # Explicit replace (hermes' built-in memory tool): authoritative, no judge.
+        action, supersedes_id = "supersede", force_supersede_id
+    elif top is not None:
         sim = top["cosine"]
         if sim >= _DUP_COSINE_HI:
             action, supersedes_id = "duplicate", top["id"]
@@ -644,6 +650,7 @@ def manual_capture(
     pinned: bool = False,
     session_id: str = "",
     cfg: Optional[Dict[str, Any]] = None,
+    supersede_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Explicit, caller-decided capture (the ``memohood_capture`` tool,
     ``on_memory_write``'s built-in-memory mirror, ``on_delegation``'s
@@ -676,5 +683,38 @@ def manual_capture(
 
     return _store_capture(
         conn, clean, kind=kind, notability=notability, source="EXTRACTED",
-        pinned=pinned, session_id=session_id, cfg=cfg,
+        pinned=pinned, session_id=session_id, cfg=cfg, force_supersede_id=supersede_id,
     )
+
+
+def find_active_by_content(conn: sqlite3.Connection, content: str) -> Optional[str]:
+    """Id of the newest ACTIVE capture whose stored content equals *content*
+    after the same secret-scrub/strip :func:`manual_capture` applies -- how
+    a built-in memory entry is matched back to its mirror. None if absent."""
+    clean, _findings = _scrub_secrets((content or "").strip())
+    clean = clean.strip()
+    if not clean:
+        return None
+    row = conn.execute(
+        "SELECT id FROM captures WHERE invalidated_at IS NULL AND content = ? ORDER BY created_at DESC LIMIT 1",
+        (clean,),
+    ).fetchone()
+    return row["id"] if row is not None else None
+
+
+def forget_by_content(conn: sqlite3.Connection, content: str) -> Optional[str]:
+    """Invalidate (tag ``memory_removed``) the active mirror of a removed
+    built-in memory entry and drop it from the FTS/vec indexes. Returns the
+    capture id, or None if no mirror was found."""
+    cid = find_active_by_content(conn, content)
+    if cid is None:
+        return None
+    now = db.now()
+    with conn:
+        conn.execute(
+            "UPDATE captures SET invalidated_at = ?, updated_at = ?, "
+            "tags = CASE WHEN tags = '' THEN 'memory_removed' ELSE tags || ';memory_removed' END WHERE id = ?",
+            (now, now, cid),
+        )
+        db.drop_capture_from_indexes(conn, [cid])
+    return cid

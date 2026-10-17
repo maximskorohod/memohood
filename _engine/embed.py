@@ -45,6 +45,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -232,9 +233,19 @@ DEFAULT_LOCAL_MODEL = "intfloat/multilingual-e5-large"
 _LOCAL_MODELS: Dict[str, Any] = {}
 
 
+_LOCAL_MODELS_LOCK = threading.Lock()
+
+
 def _get_local_model(model: str):
     inst = _LOCAL_MODELS.get(model)
-    if inst is None:
+    if inst is not None:
+        return inst
+    # Prefetch, tool calls and sync_turn run on different threads: one load
+    # (and first-run download) per model, not one per concurrent caller.
+    with _LOCAL_MODELS_LOCK:
+        inst = _LOCAL_MODELS.get(model)
+        if inst is not None:
+            return inst
         try:
             from fastembed import TextEmbedding
         except ImportError as exc:
@@ -248,7 +259,7 @@ def _get_local_model(model: str):
         except Exception as exc:  # noqa: BLE001 - surface load/download failure as EmbedError
             raise EmbedError(f"could not load local embed model {model!r}: {exc}") from exc
         _LOCAL_MODELS[model] = inst
-    return inst
+        return inst
 
 
 def _apply_e5_prefix(texts: List[str], model: str, is_query: bool) -> List[str]:
@@ -324,7 +335,16 @@ def embed_texts(
         raise EmbedError(f"unknown embedder provider: {provider!r}")
 
     _validate_vectors(vectors, dims, len(texts))
-    return vectors
+    # Every consumer derives cosine from vec0's L2 distance as 1 - d^2/2, which
+    # holds only for unit vectors -- don't rely on each provider normalizing.
+    return [_l2_normalize(v) for v in vectors]
+
+
+def _l2_normalize(vec: Sequence[float]) -> List[float]:
+    norm = math.sqrt(sum(float(x) * float(x) for x in vec))
+    if norm <= 0.0:
+        return [float(x) for x in vec]
+    return [float(x) / norm for x in vec]
 
 
 # ---------------------------------------------------------------------------

@@ -75,6 +75,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import query_norm
@@ -286,6 +287,7 @@ def _decide(pos_sim: float, neg_sim: float, *, margin: float, threshold: float) 
 
 _EMBEDDER_CACHE: Dict[str, Any] = {}
 _SEED_EMBED_CACHE: Dict[str, Dict[str, List[List[float]]]] = {}
+_CACHE_LOCK = threading.Lock()
 _degrade_logged = False  # module-level "log once" flag (see _log_degrade_once)
 
 
@@ -300,11 +302,17 @@ def _load_embedder(model_name: str) -> Any:
     cached = _EMBEDDER_CACHE.get(model_name)
     if cached is not None:
         return cached
-    from model2vec import StaticModel  # heavy/optional import, kept local (project convention)
+    # hermes >= 0.22 runs prefetch on several threads: without the lock two
+    # concurrent first calls would each load (and maybe download) the model.
+    with _CACHE_LOCK:
+        cached = _EMBEDDER_CACHE.get(model_name)
+        if cached is not None:
+            return cached
+        from model2vec import StaticModel  # heavy/optional import, kept local (project convention)
 
-    model = StaticModel.from_pretrained(model_name)
-    _EMBEDDER_CACHE[model_name] = model
-    return model
+        model = StaticModel.from_pretrained(model_name)
+        _EMBEDDER_CACHE[model_name] = model
+        return model
 
 
 def _embed(embedder: Any, texts: Sequence[str]) -> List[List[float]]:
@@ -322,12 +330,16 @@ def _seed_embeddings(embedder: Any, model_name: str) -> Dict[str, List[List[floa
     cached = _SEED_EMBED_CACHE.get(model_name)
     if cached is not None:
         return cached
-    seeds = {
-        "positive": _embed(embedder, POSITIVE_SEEDS),
-        "negative": _embed(embedder, NEGATIVE_SEEDS),
-    }
-    _SEED_EMBED_CACHE[model_name] = seeds
-    return seeds
+    with _CACHE_LOCK:
+        cached = _SEED_EMBED_CACHE.get(model_name)
+        if cached is not None:
+            return cached
+        seeds = {
+            "positive": _embed(embedder, POSITIVE_SEEDS),
+            "negative": _embed(embedder, NEGATIVE_SEEDS),
+        }
+        _SEED_EMBED_CACHE[model_name] = seeds
+        return seeds
 
 
 def _log_degrade_once(exc: BaseException) -> None:

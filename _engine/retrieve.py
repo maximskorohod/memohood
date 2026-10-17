@@ -80,6 +80,7 @@ OVERFETCH_MULT = 3
 TOP_RANK_BONUS_1 = 0.05
 TOP_RANK_BONUS_2_3 = 0.02
 RERANK_INPUT_MAX = 20  # candidates handed to the (paid) reranker per query
+MAX_MATCH_TERMS = 32  # cap on OR-ed terms in one FTS5 MATCH expression
 
 # qmd positional blend weights: (max_rank_inclusive, weight_rrf, weight_rerank)
 _BLEND_BUCKETS: List[Tuple[int, float, float]] = [
@@ -119,6 +120,8 @@ def _build_match_expression(raw_query: str, *, stem_col: str, raw_col: str) -> O
     seen_coded: set = set()
 
     for raw_tok in _TOKEN_RE.findall(raw_query):
+        if len(parts) >= MAX_MATCH_TERMS:
+            break  # a pasted page/log must not become a thousand-term OR query
         tok = _STRIP_EDGE_PUNCT_RE.sub("", raw_tok)
         if not tok:
             continue
@@ -136,7 +139,7 @@ def _build_match_expression(raw_query: str, *, stem_col: str, raw_col: str) -> O
 
     if not parts:
         return None
-    return " OR ".join(parts)
+    return " OR ".join(parts[:MAX_MATCH_TERMS])
 
 
 # ---------------------------------------------------------------------------

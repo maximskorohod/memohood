@@ -434,10 +434,17 @@ class MemoHoodMemoryProvider(MemoryProvider):
         rewound: bool = False,
         **kwargs: Any,
     ) -> None:
+        old_session_id = self._session_id
         self._session_id = new_session_id
         if reset:
             with self._prefetch_lock:
                 self._prefetch_cache.clear()
+        elif rewound:
+            # A rewind drops turns: a recall cached for the same text may have been
+            # computed from (and reinforced) context that no longer exists.
+            with self._prefetch_lock:
+                for key in {old_session_id or "-", new_session_id or "-"}:
+                    self._prefetch_cache.pop(key, None)
 
     def on_memory_write(
         self,
@@ -446,7 +453,16 @@ class MemoHoodMemoryProvider(MemoryProvider):
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        if self._is_child or not self._ready or action != "add" or not content:
+        if self._is_child or not self._ready or action not in ("add", "replace", "remove"):
+            return
+        # replace/remove identify the entry by metadata["previous_content"] (hermes
+        # >= 0.22); older callers omit it, and then only `add` can be mirrored.
+        previous = (metadata or {}).get("previous_content") or ""
+        if action == "add" and not content:
+            return
+        if action == "remove" and not previous:
+            return
+        if action == "replace" and not content:
             return
         hermes_home = self._hermes_home
         cfg = self._cfg
@@ -459,8 +475,13 @@ class MemoHoodMemoryProvider(MemoryProvider):
             except db.DbError:
                 return
             try:
+                if action == "remove":
+                    capture_mod.forget_by_content(conn, previous)
+                    return
+                old_id = capture_mod.find_active_by_content(conn, previous) if previous else None
                 capture_mod.manual_capture(
                     conn, content, kind=kind, notability="medium", pinned=False, session_id=sid, cfg=cfg,
+                    supersede_id=old_id,
                 )
             except Exception:  # noqa: BLE001
                 logger.debug("memohood.on_memory_write: mirror failed", exc_info=True)
