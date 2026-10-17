@@ -40,6 +40,7 @@ pip_dependencies:
   - PyStemmer
   - ftfy
   - requests
+  - PyYAML  # config save (setup wizard); no longer a guaranteed transitive dep of hermes core
   # model2vec (gate.backend: model2vec) is opt-in and deliberately NOT listed:
   # hermes >= 0.22 builds every declared dependency into the managed env on
   # update, and a dependency that fails to resolve gets the whole provider
