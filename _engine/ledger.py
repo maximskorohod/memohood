@@ -41,21 +41,42 @@ class LedgerError(RuntimeError):
     spend ceiling has already been reached — caller must not start the job."""
 
 
-# (provider, op) -> $ per billing unit. Unit meaning is documented at each
-# call site (embed.py passes "thousands of approx tokens" for cloudflare
-# embed calls; rerank.py passes "number of rerank search-units" for cohere
-# rerank calls).
+# (provider, op) -> $ per billing unit. Units are raw (approx) TOKENS for
+# cloudflare embed and gemini calls, and "number of rerank search-units" for
+# cohere rerank calls.
 #
-# Cloudflare Workers AI @cf/baai/bge-m3: priced per-token, on the order of
-# ~$0.012 / 1M input tokens as of Cloudflare's public Workers AI pricing
-# page — expressed here as $ per 1K tokens.
+# Cloudflare Workers AI @cf/baai/bge-m3: ~$0.012 / 1M input tokens as of
+# Cloudflare's public Workers AI pricing page — expressed here per token
+# (1,000 tokens = $0.000012).
 # Cohere rerank-v3.5: priced per "search unit" (roughly: 1 query x up to 100
 # documents), historically ~$2.00 / 1000 search units.
+# Gemini flash-lite: ~$0.10 / 1M input and ~$0.40 / 1M output tokens; the
+# per-token fallback below is the input rate (extract_llm.py passes an exact
+# input/output split as est_usd when the reply carries usage).
 _PRICING_USD: dict = {
-    ("cloudflare", "embed"): 0.000012,   # $ per 1,000 approx-tokens
-    ("cohere", "rerank"): 0.002,         # $ per rerank search-unit
-    ("gemini", "extract"): 0.0,          # flash-lite generous free tier; see extract_llm.py
+    ("cloudflare", "embed"): 0.012 / 1_000_000,   # $ per approx-token
+    ("cohere", "rerank"): 0.002,                  # $ per rerank search-unit
+    ("gemini", "extract"): 0.10 / 1_000_000,      # $ per token (input rate)
 }
+GEMINI_OUTPUT_USD_PER_TOKEN = 0.40 / 1_000_000
+
+
+def approx_tokens(texts) -> int:
+    """~4 chars/token, the standard rough heuristic; at least 1."""
+    return max(1, round(sum(len(t or "") for t in texts) / 4))
+
+
+def record_embed_call(conn: sqlite3.Connection, cfg: dict, texts) -> None:
+    """Record one embedding call in the ledger. Only the paid cloud embedder
+    (cloudflare) is tracked; the local fastembed provider is free. Never
+    raises -- bookkeeping must not break a successful embed."""
+    embedder = (cfg or {}).get("embedder", cfg) or {}
+    if (embedder.get("provider") or "cloudflare").lower() != "cloudflare":
+        return
+    try:
+        record_call(conn, provider="cloudflare", op="embed", units=approx_tokens(texts))
+    except Exception:  # noqa: BLE001
+        logger.error("ledger: failed to record embed spend", exc_info=True)
 
 _DEFAULT_FALLBACK_PRICE = 0.0  # unknown (provider, op): estimate as free rather than guess wildly
 

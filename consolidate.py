@@ -345,6 +345,8 @@ def _rollup_level(
         if len(items) < _ROLLUP_MIN_CAPTURES:
             continue
         texts = [it["content"] for it in items if it["content"]]
+        if not extract_llm.within_ceiling(conn, cfg):
+            break  # gemini monthly ceiling reached: retry the remaining buckets next night
         try:
             summary_text = extract_llm.summarize(texts, level=level, model=extract_llm.resolve_model(cfg), conn=conn)
         except Exception:  # noqa: BLE001 - one bucket's LLM failure must not block the rest

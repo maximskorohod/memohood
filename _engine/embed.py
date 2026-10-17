@@ -49,6 +49,7 @@ import time
 from typing import Any, Dict, List, Optional, Sequence
 
 from .. import db
+from . import ledger as ledger_mod
 from .secrets import get_env
 from .security import DEFAULT_USER_AGENT
 
@@ -397,6 +398,7 @@ def reembed_captures_shadow(
                 batch = captures[start : start + batch_size]
                 texts = [row["content"] for row in batch]
                 vectors = embed_texts(texts, new_cfg)
+                ledger_mod.record_embed_call(conn, new_cfg, texts)
                 with conn:
                     for row, vec in zip(batch, vectors):
                         conn.execute(

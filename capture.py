@@ -314,11 +314,7 @@ def _nearest_captures(
         return [], None
     new_vec = vectors[0]
 
-    approx_units = max(1, round(len(content) / 4))  # ~4 chars/token, standard rough heuristic
-    try:
-        ledger_mod.record_call(conn, provider="cloudflare", op="embed", units=approx_units)
-    except Exception:  # noqa: BLE001 - ledger bookkeeping must never break a successful embed
-        logger.error("capture: failed to record ledger spend", exc_info=True)
+    ledger_mod.record_embed_call(conn, cfg, [content])
 
     vec_table = db.vec_table_name()
     packed = embed_mod.serialize_vector(new_vec)
@@ -425,7 +421,7 @@ def _store_capture(
         sim = top["cosine"]
         if sim >= _DUP_COSINE_HI:
             action, supersedes_id = "duplicate", top["id"]
-        elif sim >= _DUP_COSINE_LO:
+        elif sim >= _DUP_COSINE_LO and extract_llm.within_ceiling(conn, cfg):
             judged = extract_llm.judge(content, candidates[:3], model=extract_llm.resolve_model(cfg), conn=conn)
             action = judged.get("action") or "independent"
             supersedes_id = judged.get("supersedes_id")
@@ -548,6 +544,8 @@ def extract_and_store(
         source_type = "EXTRACTED"
         pinned = sig["pinned"]
     else:
+        if not extract_llm.within_ceiling(conn, cfg):
+            return None  # gemini monthly ceiling reached: borderline turns are not worth overspending on
         result = extract_llm.extract(text, model=extract_llm.resolve_model(cfg), conn=conn)
         if result is None or not result.get("is_memorable"):
             return None

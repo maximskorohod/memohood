@@ -68,6 +68,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .. import db
 from . import embed as embed_mod
+from . import ledger as ledger_mod
 from . import rerank as rerank_mod
 from . import stem as stem_mod
 
@@ -233,6 +234,14 @@ def _vector_search(conn: sqlite3.Connection, query: str, limit: int, cfg: Dict[s
     if not _vec_ready(conn):
         return []
 
+    embedder = cfg.get("embedder") or {}
+    if (embedder.get("provider") or "cloudflare").lower() == "cloudflare":
+        try:
+            ledger_mod.ensure_within_ceiling(conn, "cloudflare", cfg)
+        except ledger_mod.LedgerError as exc:
+            logger.info("retrieve: %s; vector leg skipped", exc)
+            return []
+
     try:
         vectors = embed_mod.embed_texts([query], cfg, is_query=True)
     except embed_mod.EmbedError as exc:
@@ -240,6 +249,7 @@ def _vector_search(conn: sqlite3.Connection, query: str, limit: int, cfg: Dict[s
         return []
     if not vectors:
         return []
+    ledger_mod.record_embed_call(conn, cfg, [query])
 
     vec_table = db.vec_table_name()
     packed = embed_mod.serialize_vector(vectors[0])

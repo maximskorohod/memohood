@@ -194,6 +194,46 @@ def _extract_json_object(raw_text: str) -> Dict[str, Any]:
     raise ExtractError(f"could not parse a JSON object from model reply: {raw_text[:300]!r}")
 
 
+def _estimate_gemini_cost(usage: Dict[str, Any], system_prompt: str, user_content: str, reply: Any) -> tuple:
+    """``(total_tokens, est_usd)`` for one call: the reply's ``usage`` split
+    (prompt/completion) when present, else a ~4 chars/token estimate. Never
+    zero -- a $0 estimate would make the gemini monthly ceiling meaningless
+    once the free tier is exceeded."""
+    def _num(v: Any) -> Optional[float]:
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    prompt = _num(usage.get("prompt_tokens"))
+    completion = _num(usage.get("completion_tokens"))
+    if prompt is None:
+        prompt = float(ledger_mod.approx_tokens([system_prompt, user_content]))
+    if completion is None:
+        completion = float(ledger_mod.approx_tokens([reply if isinstance(reply, str) else ""]))
+    est = (
+        prompt * ledger_mod.estimate_cost_usd("gemini", "extract", 1)
+        + completion * ledger_mod.GEMINI_OUTPUT_USD_PER_TOKEN
+    )
+    return prompt + completion, est
+
+
+def within_ceiling(conn: Any, cfg: Optional[Dict[str, Any]]) -> bool:
+    """False once the trailing-30-day gemini spend has reached
+    ``memory.memohood.monthly_ceiling_usd.gemini`` -- callers skip the LLM
+    call and degrade exactly as on a failed call. True without a connection."""
+    if conn is None:
+        return True
+    try:
+        ledger_mod.ensure_within_ceiling(conn, "gemini", cfg or {})
+    except ledger_mod.LedgerError as exc:
+        logger.info("extract_llm: %s; skipping the LLM call", exc)
+        return False
+    except Exception:  # noqa: BLE001 - a ledger read hiccup must not block capture
+        logger.debug("extract_llm: ceiling check failed", exc_info=True)
+    return True
+
+
 def _call_gemini(
     system_prompt: str,
     user_content: str,
@@ -242,14 +282,9 @@ def _call_gemini(
         raise ExtractError(f"Gemini response missing choices[0].message.content: {str(payload)[:500]}") from exc
 
     if conn is not None:
-        usage = payload.get("usage") or {}
-        total_tokens = usage.get("total_tokens")
+        units, est_usd = _estimate_gemini_cost(payload.get("usage") or {}, system_prompt, user_content, content)
         try:
-            ledger_mod.record_call(
-                conn, provider="gemini", op="extract",
-                units=float(total_tokens) if total_tokens is not None else None,
-                est_usd=0.0,  # flash-lite free tier; see _engine/ledger.py's pricing table
-            )
+            ledger_mod.record_call(conn, provider="gemini", op="extract", units=units, est_usd=est_usd)
         except Exception:  # noqa: BLE001 - ledger bookkeeping must never break a successful call
             logger.error("extract_llm: failed to record ledger spend", exc_info=True)
 
