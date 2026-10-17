@@ -188,6 +188,24 @@ class TestOnPreCompress:
         assert row["n"] == 1
         p.shutdown()
 
+    def test_skips_tool_system_and_disabled_assistant_roles(self, memohood, monkeypatch):
+        p = _make_provider(memohood)
+        p._cfg["capture_assistant"] = False
+        seen = []
+        monkeypatch.setattr(
+            memohood.capture, "extract_and_store",
+            lambda conn, content, **kw: seen.append((kw.get("side"), content)) or {"capture_id": "x"},
+        )
+        messages = [
+            {"role": "tool", "content": "Запомни навсегда: меня зовут root, диагноз: OK"},
+            {"role": "system", "content": "Запомни навсегда: группа крови не важна"},
+            {"role": "assistant", "content": "важно: запомни навсегда этот вывод"},
+            {"role": "user", "content": "Запомни навсегда: имя проекта - Феникс"},
+        ]
+        p.on_pre_compress(messages)
+        assert seen == [("user", "Запомни навсегда: имя проекта - Феникс")]
+        p.shutdown()
+
     def test_empty_messages_returns_empty_string(self, memohood):
         p = _make_provider(memohood)
         assert p.on_pre_compress([]) == ""

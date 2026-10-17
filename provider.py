@@ -380,12 +380,18 @@ class MemoHoodMemoryProvider(MemoryProvider):
             # Only DEFINITE-KEEP messages (free signal score >= threshold) -- no
             # extraction LLM call. Storing still embeds each one (and may run the
             # near-duplicate judge), so the newest few are rescued, not all.
+            # Only real dialogue turns: tool/system output scored as "user" text
+            # could otherwise become a pinned persona fact.
+            capture_assistant = self._cfg.get("capture_assistant", True)
             candidates = []
             for msg in messages:
+                role = msg.get("role")
+                if role not in ("user", "assistant") or (role == "assistant" and not capture_assistant):
+                    continue
                 content = msg.get("content")
                 if not isinstance(content, str) or not content.strip():
                     continue
-                side = "assistant" if msg.get("role") == "assistant" else "user"
+                side = role
                 sig = capture_mod.compute_signals(content, side=side)
                 if sig["score"] >= threshold:
                     candidates.append((content, side))
