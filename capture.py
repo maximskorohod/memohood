@@ -116,12 +116,17 @@ _USER_SIGNALS: List[Tuple["re.Pattern[str]", float, str, bool]] = [
 
 # Identity/safety/medical — ALWAYS treated as a pinned (decay-exempt)
 # trigger regardless of which band (definite-keep vs borderline) the
-# message otherwise falls into.
+# message otherwise falls into. Applied to the USER side only, and only in
+# first-person phrasing with word boundaries: a bare stem ("диагноз",
+# "аллерги") also matches assistant prose like «диагноз проблемы».
 _PINNED_TRIGGER_RE = re.compile(
-    r"запомни навсегда|это важно навсегда|"
-    r"меня зовут|мой день рождения|я родил(?:ся|ась)|"
-    r"аллерги|диагноз|группа крови|непереносимост|"
-    r"\bremember forever\b|\bmy name is\b|\bmy birthday\b|\bi'?m allergic\b|\bblood type\b",
+    r"\bзапомни\s+(?:это\s+)?навсегда\b|\bэто важно навсегда\b|"
+    r"\bменя зовут\b|\bмой день рождения\b|\bя родил(?:ся|ась)\b|"
+    r"\bу меня\s+(?:\w+\s+){0,2}?(?:аллерги[яиюей]\w*|непереносимост\w*|диагноз\w*)|"
+    r"\bя\s+аллергик\b|\bмой диагноз\b|\bмне поставили\s+(?:\w+\s+)?диагноз\b|"
+    r"\b(?:моя|у меня)\s+(?:\w+\s+)?группа крови\b|\bгруппа крови у меня\b|"
+    r"\bremember (?:this |that )?forever\b|\bmy name is\b|\bmy birthday\b|\bi'?m allergic\b|"
+    r"\bi am allergic\b|\bmy blood type\b",
     re.IGNORECASE,
 )
 
@@ -156,7 +161,7 @@ def compute_signals(text: str, *, side: str = "user") -> Dict[str, Any]:
                 best_weight = weight
                 best_kind = kind
 
-    pinned = bool(_PINNED_TRIGGER_RE.search(text))
+    pinned = side != "assistant" and bool(_PINNED_TRIGGER_RE.search(text))
     if pinned:
         best_kind = "persona" if best_kind == "fact" else best_kind
         score = max(score, 4.0)  # identity/safety/medical is always at least a definite-keep signal

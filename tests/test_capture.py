@@ -94,6 +94,29 @@ class TestSignalScoring:
         assert row["pinned"] == 1
         conn.close()
 
+    @pytest.mark.parametrize("text", [
+        "у меня аллергия на арахис",
+        "Мне поставили диагноз гастрит",
+        "моя группа крови вторая положительная",
+        "у меня непереносимость лактозы",
+        "запомни навсегда: я не пью кофе",
+        "I'm allergic to penicillin",
+    ])
+    def test_pinned_trigger_user_phrasings(self, memohood, text):
+        assert memohood.capture.compute_signals(text, side="user")["pinned"] is True
+
+    @pytest.mark.parametrize("text", [
+        "Диагноз проблемы: таймаут в пуле соединений",
+        "аллергия на тему таких багов у всех",
+        "группа кровельщиков приехала",
+    ])
+    def test_pinned_trigger_ignores_non_personal_text(self, memohood, text):
+        assert memohood.capture.compute_signals(text, side="user")["pinned"] is False
+
+    def test_pinned_trigger_never_on_assistant_side(self, memohood):
+        sig = memohood.capture.compute_signals("Вывод: меня зовут бот, диагноз проблемы найден", side="assistant")
+        assert sig["pinned"] is False
+
     def test_empty_text_returns_none(self, memohood):
         conn = memohood.db.get_connection(hermes_home=str(memohood._hermes_home_for_test))
         assert memohood.capture.extract_and_store(conn, "   ", side="user", cfg=_cfg(memohood)) is None
