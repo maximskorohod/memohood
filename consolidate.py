@@ -7,7 +7,7 @@ by this module itself -- ``cli.py``/the operator's own cron config calls
 :func:`run_nightly`). Four independent stages, each caught separately so
 one stage's failure never blocks the others:
 
-  1. :func:`run_decay` -- Ebbinghaus decay: ``confidence * exp(-age_days /
+  1. :func:`run_decay` -- Ebbinghaus decay: ``1.0 * exp(-age_days /
      halflife)`` per kind (``memory.memohood.decay.halflife_days``, defaults
      event=7, preference/decision/correction=90,
      fact/persona/instruction/summary=365). ``pinned``
@@ -15,7 +15,10 @@ one stage's failure never blocks the others:
      ``last_seen_at`` (reinforced on every
      recall hit by ``provider.py``'s prefetch, not just at write time), so
      an old-but-frequently-recalled capture survives longer than an old,
-     never-revisited one. A capture whose decayed confidence falls below
+     never-revisited one. Idempotent: the base is always the initial 1.0
+     (every writer stores captures at confidence 1.0), never last night's
+     already-decayed value -- otherwise decay compounds on every run while
+     the age keeps growing. A capture whose decayed confidence falls below
      ``memory.memohood.decay.floor`` (default 0.05) is ARCHIVED, not deleted:
      ``invalidated_at`` is set (the same column ``_engine/retrieve.py``
      already excludes on) and ``tags`` gains an ``archived_decay`` marker
@@ -74,6 +77,8 @@ _DEFAULT_HALFLIFE_DAYS: Dict[str, float] = {
     "summary": 365,
 }
 _DEFAULT_FLOOR = 0.05
+# Every capture writer (capture.py, rollup summaries) stores confidence=1.0.
+_DECAY_BASE_CONFIDENCE = 1.0
 
 _ROLLUP_MIN_CAPTURES = 5
 _ROLLUP_MIN_AGE_DAYS = {"day": 1.0, "week": 7.0, "month": 30.0}
@@ -124,7 +129,10 @@ def run_decay(conn: sqlite3.Connection, cfg: Dict[str, Any]) -> Dict[str, int]:
     decayed_count = 0
     archived_count = 0
     for r in rows:
-        new_conf = compute_decay_confidence(r["confidence"], r["kind"], r["last_seen_at"], now=now, cfg=cfg)
+        # Base is the initial confidence, not r["confidence"]: the stored value is
+        # already the previous run's result and age is measured from last_seen_at
+        # again, so reusing it would compound the decay every night.
+        new_conf = compute_decay_confidence(_DECAY_BASE_CONFIDENCE, r["kind"], r["last_seen_at"], now=now, cfg=cfg)
         if new_conf < floor:
             tags = r["tags"] or ""
             new_tags = f"{tags};archived_decay" if tags else "archived_decay"

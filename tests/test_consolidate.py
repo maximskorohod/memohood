@@ -61,6 +61,22 @@ class TestDecay:
         assert result["decayed"] >= 1
         conn.close()
 
+    def test_decay_is_idempotent_across_consecutive_runs(self, memohood, monkeypatch):
+        # A fact unseen for 30 days, then 10 nightly runs: confidence must equal
+        # exp(-40/365) (decay from last_seen_at with base 1.0), not compound.
+        import math
+        conn = memohood.db.get_connection(hermes_home=str(memohood._hermes_home_for_test))
+        cfg = _cfg(memohood)
+        cid = _insert_capture(conn, memohood, kind="fact", pinned=False, last_seen_age_days=30)
+        start = memohood.db.now()
+        for night in range(1, 11):
+            monkeypatch.setattr(memohood.db, "now", lambda n=night: start + n * 86400.0)
+            memohood.consolidate.run_decay(conn, cfg)
+        row = conn.execute("SELECT * FROM captures WHERE id=?", (cid,)).fetchone()
+        assert row["invalidated_at"] is None
+        assert row["confidence"] == pytest.approx(math.exp(-40 / 365), rel=1e-3)
+        conn.close()
+
     def test_compute_decay_confidence_pure_function(self, memohood):
         # The formula is confidence * exp(-age_days / halflife) (verbatim
         # from DESIGN_v1.md) -- despite the config key's name, this is an
