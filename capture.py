@@ -24,7 +24,10 @@ DESIGN_v1.md's six numbered steps verbatim:
          :func:`_fts_dup_candidates` word-overlap fallback >= 0.95) ->
          ``duplicate``, no LLM call, no new row (bump the old row's
          ``last_seen_at`` -- Ebbinghaus "reinforce on access").
-       - cosine < 0.92 -> ``independent``, no LLM call, insert normally.
+       - cosine < 0.92 -> ``independent``, no LLM call, insert normally --
+         except kinds correction/preference/decision with cosine >= 0.5 and
+         a Gemini key configured, which also go to the judge (a real
+         correction is rarely a near-paraphrase of what it replaces).
        - 0.92 <= cosine < 0.95 -> ONE ``extract_llm.judge()`` call decides
          duplicate/supersede/independent. On ``supersede``: the OLD
          capture gets ``invalidated_at`` set (soft-invalidate, excluded
@@ -83,6 +86,7 @@ from ._engine import embed as embed_mod
 from ._engine import ledger as ledger_mod
 from ._engine import retrieve as retrieve_mod
 from ._engine import security
+from ._engine.secrets import get_env
 from ._engine import stem as stem_mod
 
 logger = logging.getLogger("memohood.capture")
@@ -255,6 +259,19 @@ def _is_echo_of_summary(conn: sqlite3.Connection, text: str) -> bool:
 
 _DUP_COSINE_HI = 0.95
 _DUP_COSINE_LO = 0.92
+
+# A real correction ("мы перешли с MySQL на PostgreSQL") is usually far below
+# 0.92 to the fact it replaces, so for these kinds the judge also sees
+# moderately similar candidates -- but only when a Gemini key is configured
+# (no key = the judge would just degrade to "independent" after a wasted call).
+_SUPERSEDE_KINDS = frozenset({"correction", "preference", "decision"})
+_SUPERSEDE_JUDGE_LO = 0.5
+
+
+def _should_judge(kind: str, sim: float) -> bool:
+    if sim >= _DUP_COSINE_LO:
+        return True
+    return kind in _SUPERSEDE_KINDS and sim >= _SUPERSEDE_JUDGE_LO and bool(get_env("GEMINI_API_KEY"))
 
 
 def _filter_active(conn: sqlite3.Connection, ids: List[str]) -> "set[str]":
@@ -430,8 +447,10 @@ def _store_capture(
         sim = top["cosine"]
         if sim >= _DUP_COSINE_HI:
             action, supersedes_id = "duplicate", top["id"]
-        elif sim >= _DUP_COSINE_LO and extract_llm.within_ceiling(conn, cfg):
-            judged = extract_llm.judge(content, candidates[:3], model=extract_llm.resolve_model(cfg), conn=conn)
+        elif _should_judge(kind, sim) and extract_llm.within_ceiling(conn, cfg):
+            floor = _DUP_COSINE_LO if sim >= _DUP_COSINE_LO else _SUPERSEDE_JUDGE_LO
+            to_judge = [c for c in candidates[:3] if c["cosine"] >= floor]
+            judged = extract_llm.judge(content, to_judge, model=extract_llm.resolve_model(cfg), conn=conn)
             action = judged.get("action") or "independent"
             supersedes_id = judged.get("supersedes_id")
             if action not in ("duplicate", "supersede"):
