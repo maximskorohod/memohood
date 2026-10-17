@@ -5,7 +5,7 @@ description: >
   перед каждым ходом, авто-извлечение фактов (correction/decision/preference)
   из диалога, гибридный поиск (FTS5 RU-стемминг + вектор Cloudflare BGE-M3 +
   RRF), pinned-факты без забывания, SUPERSEDE вместо затирания истории.
-author: Maxim Vasko
+author: Maxim Skorohod
 kind: exclusive
 
 # NOTE (verified against the plugin loader's API contract + plugins/memory/__init__.py
