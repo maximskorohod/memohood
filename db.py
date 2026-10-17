@@ -69,7 +69,7 @@ from ._engine import stem as stem_mod
 logger = logging.getLogger("memohood.db")
 
 # Bump this and add a migration step to `_MIGRATIONS` when the schema changes.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 DB_BUSY_TIMEOUT_MS = 5000
 CONNECT_TIMEOUT_S = 5.0
@@ -384,7 +384,12 @@ def get_schema_version(conn: sqlite3.Connection) -> int:
 # Callables receive the connection and run inside the same transaction.
 # Empty for v1 -- this is the initial schema. Add entries here (never
 # rewrite DDL_STATEMENTS/history) as the schema evolves.
-_MIGRATIONS: List[tuple] = []
+_MIGRATIONS: List[tuple] = [
+    # v2: only user/assistant turns belong in the history index. Earlier versions
+    # also indexed tool results (web pages, JSON, logs), which then surfaced as
+    # "похожие места в истории" in recall and polluted the context.
+    (2, ["DELETE FROM messages_fts WHERE role IS NULL OR role NOT IN ('user', 'assistant')"]),
+]
 
 
 def migrate(conn: sqlite3.Connection) -> None:

@@ -213,8 +213,8 @@ class MemoHoodMemoryProvider(MemoryProvider):
 
         normalized = self._normalize_query(query)
         recall_cfg = self._cfg.get("recall") or {}
-        k = int(recall_cfg.get("k", 8))
-        messages_k = int(recall_cfg.get("messages_k", 4))
+        k = int(recall_cfg.get("k", 4))
+        messages_k = int(recall_cfg.get("messages_k", 2))
 
         try:
             captures = retrieve_mod.hybrid_search(conn, normalized, k, self._cfg)
@@ -475,6 +475,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
             {"key": "embedder.dims", "description": "Размерность эмбеддинга", "default": 1024},
             {"key": "rerank.enabled", "description": "Включить реранк Cohere", "default": True, "choices": [True, False]},
             {"key": "auto_capture", "description": "Авто-извлечение фактов из каждого хода", "default": True, "choices": [True, False]},
+            {"key": "capture_assistant", "description": "Извлекать факты и из ответов агента (False = только из сообщений пользователя)", "default": True, "choices": [True, False]},
             {"key": "capture_threshold", "description": "Порог бесплатного сигнального скоринга для гарантированного захвата", "default": 4.0},
             {
                 "key": "GEMINI_API_KEY", "description": "Ключ Gemini (извлечение/консолидация)", "secret": True,

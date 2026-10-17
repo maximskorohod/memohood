@@ -591,6 +591,8 @@ def process_turn(
         results["user"] = extract_and_store(conn, user_content, side="user", session_id=session_id, cfg=cfg)
     except Exception:  # noqa: BLE001 - one side's crash must not block the other
         logger.error("capture.process_turn: user-side extraction failed", exc_info=True)
+    if not cfg.get("capture_assistant", True):
+        return results
     try:
         results["assistant"] = extract_and_store(conn, assistant_content, side="assistant", session_id=session_id, cfg=cfg)
     except Exception:  # noqa: BLE001

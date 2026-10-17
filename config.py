@@ -46,6 +46,9 @@ DEFAULTS: Dict[str, Any] = {
     "embedder": {"provider": "cloudflare", "model": "@cf/baai/bge-m3", "dims": 1024},
     "rerank": {"provider": "cohere", "enabled": True},
     "auto_capture": True,
+    # False: facts are extracted from the user's messages only. The agent's own
+    # replies can carry its mistakes, which would then come back as "facts".
+    "capture_assistant": True,
     "capture_threshold": 4.0,
     "monthly_ceiling_usd": {"cloudflare": 5, "cohere": 5, "gemini": 5},
     # Not in DESIGN_v1.md's literal config.yaml sample but required by
@@ -64,7 +67,7 @@ DEFAULTS: Dict[str, Any] = {
             "summary": 365,
         },
     },
-    "recall": {"k": 8, "messages_k": 4},
+    "recall": {"k": 4, "messages_k": 2},
     "consolidate": {"enabled": True},
     # v1.1: post_recall.py's MMR + near-duplicate-collapse diversity pass,
     # run after retrieval+rerank(+graph_rerank), before formatting the

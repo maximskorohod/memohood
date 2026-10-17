@@ -207,3 +207,34 @@ class TestToolSchemas:
         result = p.handle_tool_call("memohood_capture", {"content": "тестовый факт для инструмента"}, session_id="s1")
         assert "Сохранено" in result or "id=" in result
         p.shutdown()
+
+
+class TestRecallHygiene:
+    def test_migration_v2_drops_tool_rows_from_history_index(self, memohood):
+        p = _make_provider(memohood)
+        c = _conn(p)
+        with c:
+            c.execute("DELETE FROM _meta WHERE key='schema_version'")
+            c.execute("INSERT INTO _meta(key, value) VALUES ('schema_version', '1')")
+            for role in ("user", "assistant", "tool"):
+                c.execute(
+                    "INSERT INTO messages_fts(content, content_stem, message_id, session_id, role, timestamp) "
+                    "VALUES (?, ?, ?, 's1', ?, 0)",
+                    (f"текст {role}", f"текст {role}", hash(role) % 10000, role),
+                )
+        memohood.db.migrate(c)
+        roles = sorted(r["role"] for r in c.execute("SELECT role FROM messages_fts"))
+        assert roles == ["assistant", "user"]
+        assert memohood.db.get_schema_version(c) == 2
+        p.shutdown()
+
+    def test_capture_assistant_false_skips_agent_side(self, memohood):
+        p = _make_provider(memohood)
+        cfg = dict(p._cfg, capture_assistant=False)
+        res = memohood.capture.process_turn(
+            _conn(p), "привет", "Запомни навсегда: имя проекта - Феникс", session_id="s1", cfg=cfg,
+        )
+        assert res["assistant"] is None
+        n = _conn(p).execute("SELECT COUNT(*) AS n FROM captures WHERE invalidated_at IS NULL").fetchone()["n"]
+        assert n == 0
+        p.shutdown()
