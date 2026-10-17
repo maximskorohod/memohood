@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
@@ -57,6 +58,12 @@ _HOST_RUNS_SYNC_IN_BACKGROUND = _spawn_context_thread is not None
 
 # on_pre_compress runs on the compression path: bound the per-message network work.
 _MAX_PRECOMPRESS_RESCUES = 5
+
+# hermes waits ~8s for prefetch. Each network step on the recall path (query
+# embedding, rerank) gets a short timeout and no retries, and the whole recall
+# a deadline after which the remaining network steps are skipped (FTS-only).
+_PREFETCH_NET_TIMEOUT_S = 3.0
+_PREFETCH_DEADLINE_S = 6.0
 
 from . import capture as capture_mod
 from . import config as memohood_config
@@ -222,6 +229,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
         query = (query or "").strip()
         if not query:
             return ""
+        deadline = time.monotonic() + _PREFETCH_DEADLINE_S
 
         recall_ok, gate_score, gate_reason = gate_mod.should_recall(query, cfg=self._cfg)
         if not recall_ok:
@@ -234,7 +242,9 @@ class MemoHoodMemoryProvider(MemoryProvider):
         messages_k = int(recall_cfg.get("messages_k", 2))
 
         try:
-            captures = retrieve_mod.hybrid_search(conn, normalized, k, self._cfg)
+            captures = retrieve_mod.hybrid_search(
+                conn, normalized, k, self._cfg, deadline=deadline, net_timeout=_PREFETCH_NET_TIMEOUT_S,
+            )
         except Exception:  # noqa: BLE001
             logger.warning("memohood.prefetch: hybrid_search failed", exc_info=True)
             captures = []

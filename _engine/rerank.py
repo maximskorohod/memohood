@@ -54,7 +54,15 @@ class RerankError(RuntimeError):
     degradation."""
 
 
-def _cohere_rerank(query: str, documents: List[str], *, model: str, api_key: str) -> List[Dict[str, Any]]:
+def _cohere_rerank(
+    query: str,
+    documents: List[str],
+    *,
+    model: str,
+    api_key: str,
+    timeout: float = DEFAULT_TIMEOUT_S,
+    max_retries: int = MAX_RETRIES,
+) -> List[Dict[str, Any]]:
     """Call Cohere's rerank endpoint. Returns the raw ``results`` list
     (``[{"index": int, "relevance_score": float}, ...]``), NOT necessarily
     sorted the same as the input (Cohere sorts by relevance_score desc).
@@ -76,7 +84,7 @@ def _cohere_rerank(query: str, documents: List[str], *, model: str, api_key: str
     # identical retry semantics (429/5xx, capped exponential backoff).
     resp = embed_mod._request_with_backoff(
         "POST", COHERE_RERANK_URL, headers=headers, json_body=body,
-        timeout=DEFAULT_TIMEOUT_S, max_retries=MAX_RETRIES,
+        timeout=timeout, max_retries=max_retries,
     )
     if resp.status_code != 200:
         raise RerankError(f"Cohere rerank call failed: HTTP {resp.status_code}: {resp.text[:500]}")
@@ -96,6 +104,8 @@ def rerank(
     cfg: Dict[str, Any],
     *,
     conn: Any = None,
+    timeout: float = DEFAULT_TIMEOUT_S,
+    max_retries: int = MAX_RETRIES,
 ) -> Tuple[List[Dict[str, Any]], str]:
     """Rerank *candidates* (each a dict with at least a ``"text"`` key —
     the fields produced by ``retrieve.hybrid_search``'s RRF fusion step)
@@ -139,7 +149,9 @@ def rerank(
     documents = [c.get("text") or "" for c in candidates]
 
     try:
-        results = _cohere_rerank(query, documents, model=model, api_key=api_key)
+        results = _cohere_rerank(
+            query, documents, model=model, api_key=api_key, timeout=timeout, max_retries=max_retries,
+        )
     except RerankError as exc:
         logger.warning("rerank: Cohere call failed (%s); degrading to rrf-only", exc)
         return candidates, "rrf-only"

@@ -144,7 +144,9 @@ def _request_with_backoff(
 # ---------------------------------------------------------------------------
 
 
-def _embed_cloudflare(texts: List[str], model: str) -> List[List[float]]:
+def _embed_cloudflare(
+    texts: List[str], model: str, *, timeout: float = DEFAULT_TIMEOUT_S, max_retries: int = MAX_RETRIES
+) -> List[List[float]]:
     account_id = get_env("CLOUDFLARE_ACCOUNT_ID")
     api_token = get_env("CLOUDFLARE_API_TOKEN")
     if not account_id or not api_token:
@@ -156,7 +158,9 @@ def _embed_cloudflare(texts: List[str], model: str) -> List[List[float]]:
     all_vectors: List[List[float]] = []
     for start in range(0, len(texts), BATCH_SIZE):
         batch = texts[start : start + BATCH_SIZE]
-        resp = _request_with_backoff("POST", url, headers=headers, json_body={"text": batch})
+        resp = _request_with_backoff(
+            "POST", url, headers=headers, json_body={"text": batch}, timeout=timeout, max_retries=max_retries,
+        )
         if resp.status_code != 200:
             raise EmbedError(f"Cloudflare embed call failed: HTTP {resp.status_code}: {resp.text[:500]}")
         try:
@@ -173,7 +177,8 @@ def _embed_cloudflare(texts: List[str], model: str) -> List[List[float]]:
 
 
 def _embed_openai_compat(
-    texts: List[str], *, base_url: str, model: str, api_key: Optional[str]
+    texts: List[str], *, base_url: str, model: str, api_key: Optional[str],
+    timeout: float = DEFAULT_TIMEOUT_S, max_retries: int = MAX_RETRIES,
 ) -> List[List[float]]:
     url = base_url.rstrip("/") + "/embeddings"
     headers: Dict[str, str] = {"Content-Type": "application/json"}
@@ -183,7 +188,10 @@ def _embed_openai_compat(
     all_vectors: List[List[float]] = []
     for start in range(0, len(texts), BATCH_SIZE):
         batch = texts[start : start + BATCH_SIZE]
-        resp = _request_with_backoff("POST", url, headers=headers, json_body={"input": batch, "model": model})
+        resp = _request_with_backoff(
+            "POST", url, headers=headers, json_body={"input": batch, "model": model},
+            timeout=timeout, max_retries=max_retries,
+        )
         if resp.status_code != 200:
             raise EmbedError(f"OpenAI-compat embed call failed: HTTP {resp.status_code}: {resp.text[:500]}")
         try:
@@ -271,11 +279,20 @@ def _embed_local(texts: List[str], model: str, *, is_query: bool = False) -> Lis
 # ---------------------------------------------------------------------------
 
 
-def embed_texts(texts: List[str], cfg: Dict[str, Any], *, is_query: bool = False) -> List[List[float]]:
+def embed_texts(
+    texts: List[str],
+    cfg: Dict[str, Any],
+    *,
+    is_query: bool = False,
+    timeout: float = DEFAULT_TIMEOUT_S,
+    max_retries: int = MAX_RETRIES,
+) -> List[List[float]]:
     """Embed *texts*, returning one vector per input, in the same order.
 
     ``is_query`` only matters for the local e5 provider (query vs passage
-    prefix); cloud providers ignore it. Raises :class:`EmbedError` on any
+    prefix); cloud providers ignore it. ``timeout``/``max_retries`` bound the
+    HTTP providers -- the recall path passes a short timeout and no retries
+    (hermes waits only a few seconds for prefetch). Raises :class:`EmbedError` on any
     failure — missing credentials, network failure after retries, malformed
     provider response, or output validation failure (see module docstring).
     Never records spend itself.
@@ -291,7 +308,7 @@ def embed_texts(texts: List[str], cfg: Dict[str, Any], *, is_query: bool = False
         raise EmbedError(f"cfg['embedder']['dims'] must be a positive int, got {dims!r}")
 
     if provider == "cloudflare":
-        vectors = _embed_cloudflare(texts, model)
+        vectors = _embed_cloudflare(texts, model, timeout=timeout, max_retries=max_retries)
     elif provider in ("local", "fastembed"):
         vectors = _embed_local(texts, embedder.get("model") or DEFAULT_LOCAL_MODEL, is_query=is_query)
     elif provider in ("openai", "openai-compat", "openai_compat"):
@@ -300,7 +317,9 @@ def embed_texts(texts: List[str], cfg: Dict[str, Any], *, is_query: bool = False
             raise EmbedError("openai-compat embedder requires embedder.base_url in config")
         api_key_env = embedder.get("api_key_env", "OPENAI_API_KEY")
         api_key = embedder.get("api_key") or get_env(api_key_env)
-        vectors = _embed_openai_compat(texts, base_url=base_url, model=model, api_key=api_key)
+        vectors = _embed_openai_compat(
+            texts, base_url=base_url, model=model, api_key=api_key, timeout=timeout, max_retries=max_retries,
+        )
     else:
         raise EmbedError(f"unknown embedder provider: {provider!r}")
 

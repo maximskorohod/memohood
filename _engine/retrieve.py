@@ -63,6 +63,7 @@ from __future__ import annotations
 import logging
 import re
 import sqlite3
+import time
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -221,11 +222,44 @@ def _vec_ready(conn: sqlite3.Connection) -> bool:
         return db.load_sqlite_vec(conn)
 
 
-def _vector_search(conn: sqlite3.Connection, query: str, limit: int, cfg: Dict[str, Any]) -> List[str]:
+# Below this much time left before the caller's deadline a network step is
+# skipped outright rather than started with a uselessly short timeout.
+_MIN_NET_STEP_S = 0.5
+_UNBOUNDED: Dict[str, Any] = {}  # "no budget": embed/rerank use their own timeout/retry defaults
+
+
+def _net_limits(deadline: Optional[float], net_timeout: Optional[float]) -> Optional[Dict[str, Any]]:
+    """``timeout``/``max_retries`` kwargs for one network step (query embed or
+    rerank). ``{}`` = the modules' own defaults (no budget given); a bounded
+    budget means no retries and ``timeout <= remaining time``; ``None`` =
+    the deadline leaves no room, skip the step (degrade to FTS/RRF-only)."""
+    if deadline is None and net_timeout is None:
+        return {}
+    timeout = net_timeout if net_timeout is not None else embed_mod.DEFAULT_TIMEOUT_S
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining < _MIN_NET_STEP_S:
+            return None
+        timeout = min(timeout, remaining)
+    return {"timeout": timeout, "max_retries": 0}
+
+
+def _vector_search(
+    conn: sqlite3.Connection,
+    query: str,
+    limit: int,
+    cfg: Dict[str, Any],
+    *,
+    limits: Optional[Dict[str, Any]] = _UNBOUNDED,
+) -> List[str]:
     """Return capture ids in nearest-first order via vec0 KNN. Empty list
     (never raises) if the vec leg is unavailable, captures are
-    mid-migration, or query embedding fails for any reason — all are
-    "degrade to FTS-only for this call" conditions, not errors."""
+    mid-migration, query embedding fails for any reason, or *limits* is
+    ``None`` (no time budget left) — all are "degrade to FTS-only for this
+    call" conditions, not errors. *limits* (from :func:`_net_limits`) bounds
+    the query-embedding HTTP call."""
+    if limits is None:
+        return []
     migration_state = cfg.get("migration_state") or "idle"
     if migration_state not in ("idle", None):
         logger.info("retrieve: captures mid-migration (state=%r); skipping vector leg", migration_state)
@@ -243,7 +277,7 @@ def _vector_search(conn: sqlite3.Connection, query: str, limit: int, cfg: Dict[s
             return []
 
     try:
-        vectors = embed_mod.embed_texts([query], cfg, is_query=True)
+        vectors = embed_mod.embed_texts([query], cfg, is_query=True, **limits)
     except embed_mod.EmbedError as exc:
         logger.warning("retrieve: query embedding failed (%s); vector leg empty for this query", exc)
         return []
@@ -360,6 +394,9 @@ def hybrid_search(
     query: str,
     k: int,
     cfg: Dict[str, Any],
+    *,
+    deadline: Optional[float] = None,
+    net_timeout: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """Return up to *k* fused, (optionally reranked+blended) capture
     candidates for *query*. Never raises for ordinary degradation (empty
@@ -369,6 +406,12 @@ def hybrid_search(
     *cfg* is the effective ``memory.memohood`` config (needs ``embedder`` for
     query embedding, ``rerank`` for the reranker step, and
     ``migration_state``).
+
+    *deadline* (``time.monotonic()`` value) and *net_timeout* bound the two
+    network steps for latency-sensitive callers (prefetch): each runs with
+    no retries and at most ``min(net_timeout, time left)``; a step with no
+    time left is skipped, so the result degrades to FTS/RRF-only instead of
+    blowing the caller's budget.
     """
     query = (query or "").strip()
     if not query or k <= 0:
@@ -376,7 +419,7 @@ def hybrid_search(
 
     overfetch = max(k * OVERFETCH_MULT, k)
     fts_ids = _fts_search_captures(conn, query, overfetch)
-    vector_ids = _vector_search(conn, query, overfetch, cfg)
+    vector_ids = _vector_search(conn, query, overfetch, cfg, limits=_net_limits(deadline, net_timeout))
 
     fused = rrf_fuse(fts_ids, vector_ids)
     if not fused:
@@ -407,7 +450,11 @@ def hybrid_search(
         for rank, cid in enumerate(rerank_input_ids, start=1)
     ]
 
-    ranked, mode = rerank_mod.rerank(query, rerank_candidates, cfg, conn=conn)
+    rerank_limits = _net_limits(deadline, net_timeout)
+    if rerank_limits is None:
+        ranked, mode = rerank_candidates, "rrf-only"  # no time left for the reranker
+    else:
+        ranked, mode = rerank_mod.rerank(query, rerank_candidates, cfg, conn=conn, **rerank_limits)
 
     if mode == "cohere":
         rrf_scores = [c["rrf_score"] for c in ranked]

@@ -104,7 +104,7 @@ def _seed_vector(conn, table: str, capture_id: str, vec) -> None:
 
 
 def _stub_hybrid_search(fake_results):
-    def _fake(conn, query, k, cfg):
+    def _fake(conn, query, k, cfg, **kw):
         return [dict(r) for r in fake_results]
 
     return _fake
@@ -181,7 +181,7 @@ class TestGateSkipsBeforeRetrieval:
         p = _make_provider(memohood)
         calls = []
 
-        def _spy_hybrid_search(conn, query, k, cfg):
+        def _spy_hybrid_search(conn, query, k, cfg, **kw):
             calls.append(query)
             return []
 
