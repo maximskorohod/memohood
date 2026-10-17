@@ -131,11 +131,12 @@ def _memohood_section(cfg: Dict[str, Any]) -> Dict[str, Any]:
 def get_memohood_config() -> Dict[str, Any]:
     """Return the effective ``memory.memohood.*`` config: DEFAULTS deep-merged
     with the user's ``config.yaml``. Safe to mutate -- a fresh dict every
-    call."""
+    call. Values are coerced to their DEFAULTS types, which also heals
+    string values an older setup wizard already wrote (``dims: '1024'``)."""
     from hermes_cli.config import load_config
 
     cfg = load_config()
-    return _deep_merge(DEFAULTS, _memohood_section(cfg))
+    return _deep_merge(DEFAULTS, _coerce_to_defaults(_memohood_section(cfg), DEFAULTS))
 
 
 def get_memohood_config_readonly() -> Dict[str, Any]:
@@ -149,7 +150,7 @@ def get_memohood_config_readonly() -> Dict[str, Any]:
     from hermes_cli.config import load_config_readonly
 
     cfg = load_config_readonly()
-    return _deep_merge(DEFAULTS, _memohood_section(cfg))
+    return _deep_merge(DEFAULTS, _coerce_to_defaults(_memohood_section(cfg), DEFAULTS))
 
 
 def save_memohood_config(patch: Dict[str, Any]) -> None:
@@ -190,6 +191,58 @@ _SECRET_SETUP_KEYS = frozenset(
 )
 
 
+_TRUE_STRINGS = frozenset({"true", "yes", "on", "1", "да"})
+_FALSE_STRINGS = frozenset({"false", "no", "off", "0", "нет"})
+_DROP = object()
+
+
+def _coerce_scalar(value: Any, default: Any) -> Any:
+    """Coerce a wizard-entered string to the type of its DEFAULTS counterpart
+    (bool/int/float). Returns :data:`_DROP` for an unparseable value, so the
+    previous/default setting is kept instead of persisting a string that
+    downstream ``isinstance`` checks would silently treat as "disabled"."""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if isinstance(default, bool):
+        low = text.lower()
+        if low in _TRUE_STRINGS:
+            return True
+        if low in _FALSE_STRINGS:
+            return False
+        return _DROP
+    if isinstance(default, int):
+        try:
+            num = float(text)
+        except ValueError:
+            return _DROP
+        return int(num) if num.is_integer() else num
+    if isinstance(default, float):
+        try:
+            return float(text)
+        except ValueError:
+            return _DROP
+    return value
+
+
+def _coerce_to_defaults(values: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursively coerce *values* to the leaf types of *defaults*. Keys
+    without a DEFAULTS counterpart pass through unchanged."""
+    out: Dict[str, Any] = {}
+    for key, value in values.items():
+        default = defaults.get(key) if isinstance(defaults, dict) else None
+        if isinstance(value, dict):
+            out[key] = _coerce_to_defaults(value, default if isinstance(default, dict) else {})
+            continue
+        if default is None or isinstance(default, (dict, list)):
+            out[key] = value
+            continue
+        coerced = _coerce_scalar(value, default)
+        if coerced is not _DROP:
+            out[key] = coerced
+    return out
+
+
 def save_memohood_config_at(values: Dict[str, Any], hermes_home: str) -> None:
     """Write *values* (the non-secret fields ``hermes memory setup``
     collected, per ``MemoryProvider.save_config()``'s contract -- secrets
@@ -208,6 +261,11 @@ def save_memohood_config_at(values: Dict[str, Any], hermes_home: str) -> None:
     dropped rather than written to config.yaml -- defense in depth in case
     a future setup-wizard caller passes the whole collected form instead of
     just the non-secret subset.
+
+    ``hermes memory setup`` hands every prompted value back as a string
+    (``"1024"``, ``"0.7"``, ``"true"``); each is coerced to its DEFAULTS
+    type before saving -- a string ``embedder.dims`` would disable the vector
+    leg, a string ``post_recall.mmr.lambda`` would disable MMR.
     """
     import yaml
 
@@ -236,9 +294,14 @@ def save_memohood_config_at(values: Dict[str, Any], hermes_home: str) -> None:
         cursor = nested
         for p in parts[:-1]:
             cursor = cursor.setdefault(p, {})
-        cursor[parts[-1]] = v
+        if isinstance(v, dict) and isinstance(cursor.get(parts[-1]), dict):
+            # The wizard passes the existing nested section AND dotted keys: a
+            # nested dict must not wipe dotted values expanded before it.
+            cursor[parts[-1]] = _deep_merge(v, cursor[parts[-1]])
+        else:
+            cursor[parts[-1]] = v
 
-    memory_section["memohood"] = _deep_merge(existing_memohood, nested)
+    memory_section["memohood"] = _deep_merge(existing_memohood, _coerce_to_defaults(nested, DEFAULTS))
     memory_section.setdefault("provider", "memohood")
     existing["memory"] = memory_section
 
