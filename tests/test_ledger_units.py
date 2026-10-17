@@ -31,6 +31,19 @@ def test_capture_embed_cost_is_not_inflated(memohood, monkeypatch):
     conn.close()
 
 
+def test_migration_v3_recomputes_inflated_cloudflare_spend(memohood):
+    conn = _conn(memohood)
+    with conn:
+        conn.execute("UPDATE _meta SET value = '2' WHERE key = 'schema_version'")
+    # Old code: 100k tokens recorded at the per-1K price -> $1.20 instead of $0.0012.
+    memohood.db.record_spend(conn, provider="cloudflare", op="embed", units=100_000, est_usd=1.2)
+    memohood.db.record_spend(conn, provider="cohere", op="rerank", units=1, est_usd=0.002)
+    memohood.db.migrate(conn)
+    assert memohood.db.monthly_spend(conn, "cloudflare") == pytest.approx(0.0012, rel=1e-6)
+    assert memohood.db.monthly_spend(conn, "cohere") == pytest.approx(0.002)
+    conn.close()
+
+
 def test_local_embedder_not_recorded(memohood):
     conn = _conn(memohood)
     cfg = _cfg(memohood)

@@ -69,7 +69,7 @@ from ._engine import stem as stem_mod
 logger = logging.getLogger("memohood.db")
 
 # Bump this and add a migration step to `_MIGRATIONS` when the schema changes.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DB_BUSY_TIMEOUT_MS = 5000
 CONNECT_TIMEOUT_S = 5.0
@@ -390,6 +390,11 @@ _MIGRATIONS: List[tuple] = [
     # also indexed tool results (web pages, JSON, logs), which then surfaced as
     # "похожие места в истории" in recall and polluted the context.
     (2, ["DELETE FROM messages_fts WHERE role IS NULL OR role NOT IN ('user', 'assistant')"]),
+    # v3: Cloudflare embed spend used to be estimated at $ per 1K tokens times RAW
+    # tokens (x1000). Recompute from the stored token count so the trailing-30-day
+    # ceiling stops refusing embeds right after the upgrade.
+    (3, ["UPDATE spend SET est_usd = COALESCE(units, 0) * 0.000000012 "
+         "WHERE provider = 'cloudflare' AND op = 'embed'"]),
 ]
 
 

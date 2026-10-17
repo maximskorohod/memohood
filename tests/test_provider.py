@@ -243,7 +243,7 @@ class TestRecallHygiene:
         memohood.db.migrate(c)
         roles = sorted(r["role"] for r in c.execute("SELECT role FROM messages_fts"))
         assert roles == ["assistant", "user"]
-        assert memohood.db.get_schema_version(c) == 2
+        assert memohood.db.get_schema_version(c) == memohood.db.SCHEMA_VERSION
         p.shutdown()
 
     def test_capture_assistant_false_skips_agent_side(self, memohood):
