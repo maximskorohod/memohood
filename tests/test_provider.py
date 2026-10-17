@@ -9,6 +9,15 @@ import time
 import pytest
 
 
+def _conn(p):
+    """Test-side connection for a provider (the provider itself keeps none since hermes 0.22)."""
+    c = p.__dict__.get("_test_conn")
+    if c is None:
+        c = p._connect()
+        p.__dict__["_test_conn"] = c
+    return c
+
+
 def _make_provider(memohood, *, agent_context=None, parent_session_id=""):
     p = memohood.provider.MemoHoodMemoryProvider()
     kwargs = {"hermes_home": str(memohood._hermes_home_for_test), "platform": "cli"}
@@ -23,18 +32,48 @@ def _make_provider(memohood, *, agent_context=None, parent_session_id=""):
 class TestInitialize:
     def test_initialize_opens_db_and_runs_catch_up(self, memohood):
         p = _make_provider(memohood)
-        assert p._conn is not None
+        assert p._ready
         assert (memohood._hermes_home_for_test / "memory.db").exists()
         p.shutdown()
 
     def test_missing_hermes_home_does_not_crash(self, memohood):
         p = memohood.provider.MemoHoodMemoryProvider()
         p.initialize("s1", platform="cli")  # no hermes_home kwarg at all
-        assert p._conn is None
+        assert not p._ready
         # Every method must degrade gracefully, never raise.
         assert p.prefetch("что угодно") == ""
         assert p.system_prompt_block() == ""
-        assert p.get_tool_schemas() == []
+        assert "не инициализирована" in p.handle_tool_call("memohood_stats", {})
+
+
+class TestHermes022Compat:
+    def test_tool_schemas_available_before_initialize(self, memohood):
+        # hermes 0.22 snapshots get_tool_schemas() in add_provider(), BEFORE initialize().
+        p = memohood.provider.MemoHoodMemoryProvider()
+        names = {s["name"] for s in p.get_tool_schemas()}
+        assert "memohood_stats" in names
+
+    def test_prefetch_and_tools_work_from_other_threads(self, memohood):
+        # hermes 0.22 runs prefetch in spawn_context_thread and tools in executor workers.
+        import threading
+
+        p = _make_provider(memohood)
+        memohood.capture.manual_capture(
+            _conn(p), "Мы подписали договор с новым поставщиком оборудования",
+            kind="decision", notability="high", pinned=False, session_id="s1", cfg=p._cfg,
+        )
+        out = {}
+
+        def worker():
+            out["prefetch"] = p.prefetch("расскажи про договора с поставщиком", session_id="s1")
+            out["tool"] = p.handle_tool_call("memohood_stats", {})
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join(10)
+        assert "договор" in out["prefetch"].lower()
+        assert "не удалось" not in out["tool"] and "не инициализирована" not in out["tool"]
+        p.shutdown()
 
 
 class TestChildSessionHardNoOp:
@@ -63,17 +102,17 @@ class TestPrefetchRecall:
     def test_prefetch_returns_recall_text_and_reinforces(self, memohood):
         p = _make_provider(memohood)
         result = memohood.capture.manual_capture(
-            p._conn, "Мы подписали договор с новым поставщиком оборудования",
+            _conn(p), "Мы подписали договор с новым поставщиком оборудования",
             kind="decision", notability="high", pinned=False, session_id="s1", cfg=p._cfg,
         )
         cid = result["capture_id"]
-        before = p._conn.execute("SELECT last_seen_at FROM captures WHERE id=?", (cid,)).fetchone()["last_seen_at"]
+        before = _conn(p).execute("SELECT last_seen_at FROM captures WHERE id=?", (cid,)).fetchone()["last_seen_at"]
 
         time.sleep(0.01)
         text = p.prefetch("расскажи про договора с поставщиком", session_id="s1")
         assert "договор" in text.lower()
 
-        after = p._conn.execute("SELECT last_seen_at FROM captures WHERE id=?", (cid,)).fetchone()["last_seen_at"]
+        after = _conn(p).execute("SELECT last_seen_at FROM captures WHERE id=?", (cid,)).fetchone()["last_seen_at"]
         assert after >= before
         p.shutdown()
 
@@ -98,7 +137,7 @@ class TestSyncTurn:
             session_id="s1",
         )
         p._join_background(timeout=5.0)
-        row = p._conn.execute(
+        row = _conn(p).execute(
             "SELECT COUNT(*) AS n FROM captures WHERE invalidated_at IS NULL"
         ).fetchone()
         assert row["n"] >= 1
@@ -111,8 +150,8 @@ class TestSyncTurn:
         # initialize() still opens a connection for a child context (only
         # catch_up_from_state is skipped) -- sync_turn's own is_child guard
         # is what must prevent any capture from being written.
-        assert p._conn is not None
-        row = p._conn.execute(
+        assert p._ready
+        row = _conn(p).execute(
             "SELECT COUNT(*) AS n FROM captures WHERE invalidated_at IS NULL"
         ).fetchone()
         assert row["n"] == 0
@@ -123,7 +162,7 @@ class TestSyncTurn:
         p._cfg["auto_capture"] = False
         p.sync_turn("запомни, что мой любимый редактор - VS Code", "ок", session_id="s1")
         p._join_background(timeout=2.0)
-        row = p._conn.execute(
+        row = _conn(p).execute(
             "SELECT COUNT(*) AS n FROM captures WHERE invalidated_at IS NULL"
         ).fetchone()
         assert row["n"] == 0
@@ -143,7 +182,7 @@ class TestOnPreCompress:
         ]
         summary_note = p.on_pre_compress(messages)
         assert "Феникс" in summary_note or "rescued" in summary_note.lower()
-        row = p._conn.execute(
+        row = _conn(p).execute(
             "SELECT COUNT(*) AS n FROM captures WHERE invalidated_at IS NULL"
         ).fetchone()
         assert row["n"] == 1

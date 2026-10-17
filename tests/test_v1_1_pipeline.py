@@ -38,6 +38,15 @@ from typing import Any, Dict, Optional
 import pytest
 
 
+def _conn(p):
+    """Test-side connection for a provider (the provider itself keeps none since hermes 0.22)."""
+    c = p.__dict__.get("_test_conn")
+    if c is None:
+        c = p._connect()
+        p.__dict__["_test_conn"] = c
+    return c
+
+
 def _make_provider(memohood, *, session_id="s-top"):
     p = memohood.provider.MemoHoodMemoryProvider()
     p.initialize(session_id, hermes_home=str(memohood._hermes_home_for_test), platform="cli")
@@ -119,17 +128,17 @@ class TestGatePassBackendBaseline:
         assert p._cfg["post_recall"]["mmr"]["enabled"] is True
 
         result = memohood.capture.manual_capture(
-            p._conn, "Мы подписали договор с новым поставщиком оборудования",
+            _conn(p), "Мы подписали договор с новым поставщиком оборудования",
             kind="decision", notability="high", pinned=False, session_id="s-top", cfg=p._cfg,
         )
         cid = result["capture_id"]
-        before = p._conn.execute("SELECT last_seen_at FROM captures WHERE id=?", (cid,)).fetchone()["last_seen_at"]
+        before = _conn(p).execute("SELECT last_seen_at FROM captures WHERE id=?", (cid,)).fetchone()["last_seen_at"]
         time.sleep(0.01)
 
         text = p.prefetch("расскажи про договор с поставщиком", session_id="s-top")
         assert "договор" in text.lower()
 
-        after = p._conn.execute("SELECT last_seen_at FROM captures WHERE id=?", (cid,)).fetchone()["last_seen_at"]
+        after = _conn(p).execute("SELECT last_seen_at FROM captures WHERE id=?", (cid,)).fetchone()["last_seen_at"]
         assert after >= before
         p.shutdown()
 
@@ -150,7 +159,7 @@ class TestGateSkipsBeforeRetrieval:
     def test_gate_skip_short_circuits_before_hybrid_search_runs(self, memohood, monkeypatch):
         p = _make_provider(memohood)
         memohood.capture.manual_capture(
-            p._conn, "Мы подписали договор с новым поставщиком оборудования",
+            _conn(p), "Мы подписали договор с новым поставщиком оборудования",
             kind="decision", notability="high", pinned=False, session_id="s-top", cfg=p._cfg,
         )
         p._cfg["gate"]["backend"] = "model2vec"
@@ -192,7 +201,7 @@ class TestGateSkipsBeforeRetrieval:
 class TestGraphRerankAndPostRecallWiring:
     def test_boost_expansion_and_collapse_all_fire_inside_prefetch(self, memohood, monkeypatch):
         p = _make_provider(memohood)
-        conn = p._conn
+        conn = _conn(p)
 
         vec_ready = memohood.db.ensure_vec_table(conn, dims=2)
         if not vec_ready:
@@ -293,7 +302,7 @@ class TestGraphRerankAndPostRecallWiring:
 class TestFeatureTogglesStillWork:
     def test_graph_rerank_disabled_keeps_pre_boost_order(self, memohood, monkeypatch):
         p = _make_provider(memohood)
-        conn = p._conn
+        conn = _conn(p)
         _insert_link(conn, from_sid="s-top", to_sid="s-linked", weight=0.9)
 
         fake_results = [
@@ -317,7 +326,7 @@ class TestFeatureTogglesStillWork:
 
     def test_post_recall_disabled_keeps_near_duplicates_uncollapsed(self, memohood, monkeypatch):
         p = _make_provider(memohood)
-        conn = p._conn
+        conn = _conn(p)
         vec_ready = memohood.db.ensure_vec_table(conn, dims=2)
         if not vec_ready:
             pytest.skip("sqlite-vec extension not available in this environment")
@@ -347,7 +356,7 @@ class TestFeatureTogglesStillWork:
         pass-through, and the rest of the pipeline is unaffected."""
         p = _make_provider(memohood)
         memohood.capture.manual_capture(
-            p._conn, "Мы подписали договор с новым поставщиком оборудования",
+            _conn(p), "Мы подписали договор с новым поставщиком оборудования",
             kind="decision", notability="high", pinned=False, session_id="s-top", cfg=p._cfg,
         )
         p._cfg["gate"]["backend"] = "model2vec"

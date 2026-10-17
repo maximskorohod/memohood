@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import embed as embed_mod
 from . import ledger
+from .secrets import get_env
 
 logger = logging.getLogger("memohood.rerank")
 
@@ -122,7 +123,7 @@ def rerank(
         logger.warning("rerank: unsupported provider %r configured; degrading to rrf-only", provider)
         return candidates, "rrf-only"
 
-    api_key = os.environ.get("COHERE_API_KEY")
+    api_key = get_env("COHERE_API_KEY")
     if not api_key:
         logger.info("rerank: COHERE_API_KEY not set; degrading to rrf-only")
         return candidates, "rrf-only"

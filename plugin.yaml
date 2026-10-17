@@ -40,12 +40,10 @@ pip_dependencies:
   - PyStemmer
   - ftfy
   - requests
-  # v1.1: gate.py's optional "model2vec" backend (memory.memohood.gate.backend:
-  # model2vec, opt-in only -- default stays "pass"). Tiny local/offline
-  # static-embedding package, no requires_env entry needed (no API key).
-  # Lazy-install only, per hermes_cli/memory_setup.py's pip_dependencies
-  # convention -- NOT installed by this round.
-  - model2vec
+  # model2vec (gate.backend: model2vec) is opt-in and deliberately NOT listed:
+  # hermes >= 0.22 builds every declared dependency into the managed env on
+  # update, and a dependency that fails to resolve gets the whole provider
+  # disabled (memory.provider reset to ""). Keep the required set minimal.
 
 # Informational only -- hermes does not validate or auto-configure these;
 # must already exist in $HERMES_HOME/.env. Absent keys degrade gracefully
@@ -58,6 +56,7 @@ requires_env:
   - COHERE_API_KEY
 
 hermes_core_min_version: "0.18.0"
+requires_hermes: ">=0.18.0"
 
 # No provides_tools/provides_hooks declared yet -- tools.py (memohood_search,
 # memohood_fetch, memohood_recall, memohood_stats, memohood_capture) and cli.py are

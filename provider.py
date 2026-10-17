@@ -7,17 +7,16 @@ is implemented; every documented optional hook is overridden too, per
 DESIGN_v1.md's method list.
 
 Threading contract (non-negotiable: "sync_turn MUST be non-blocking"):
-``self._conn`` (opened once in :meth:`initialize`) is used ONLY from the
-thread that calls the provider's synchronous methods (``prefetch``,
-``on_pre_compress``, ``handle_tool_call``, etc. -- always the agent's own
-turn-processing thread, never a thread this provider spawns itself).
-Every background thread this provider starts (``queue_prefetch``,
-``sync_turn``, ``on_memory_write``, ``on_delegation``) opens its OWN fresh
-``sqlite3.Connection`` via ``db.get_connection()`` and closes it when done
--- Python's ``sqlite3.Connection`` is not safe to share across threads
-without ``check_same_thread=False`` (which this project deliberately does
-not set, preferring one connection per thread over disabling sqlite3's own
-safety check).
+hermes >= 0.22 calls provider methods from different threads (``prefetch``
+runs in ``spawn_context_thread``, tool calls in executor workers, every CLI
+turn in a fresh thread), so this provider keeps NO long-lived connection.
+Every method that touches memory.db -- synchronous (``prefetch``,
+``on_pre_compress``, ``handle_tool_call``) or background (``queue_prefetch``,
+``sync_turn``, ``on_memory_write``, ``on_delegation``) -- opens its OWN
+short-lived ``sqlite3.Connection`` via :meth:`_connect` and closes it when
+done. ``check_same_thread`` stays at sqlite3's safe default. Background
+threads are started through hermes' ``spawn_context_thread`` so they inherit
+the caller's profile scope (HERMES_HOME override + secret scope).
 
 Child/delegated-session handling (DESIGN_v1.md: "Skip prefetch for
 delegated/child sessions ... no memory bleed into KB sub-agents"): hermes-
@@ -39,6 +38,11 @@ import threading
 from typing import Any, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider
+
+try:  # hermes >= 0.22: background jobs must inherit the caller's contextvars (profile/secret scope)
+    from agent.memory_provider import spawn_context_thread as _spawn_context_thread
+except ImportError:  # older hermes: plain thread, no profile scope to inherit
+    _spawn_context_thread = None
 
 from . import capture as capture_mod
 from . import config as memohood_config
@@ -74,7 +78,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
     def __init__(self) -> None:
         self._hermes_home: Optional[str] = None
         self._session_id: str = ""
-        self._conn: Optional[Any] = None
+        self._ready = False
         self._cfg: Dict[str, Any] = {}
         self._is_child = False
         self._agent_context = "primary"
@@ -114,42 +118,69 @@ class MemoHoodMemoryProvider(MemoryProvider):
             self._cfg = dict(memohood_config.DEFAULTS)
 
         try:
-            self._conn = db.get_connection(hermes_home=self._hermes_home)
+            conn = db.get_connection(hermes_home=self._hermes_home)
         except db.DbError:
             logger.error("memohood.initialize: failed to open memory.db", exc_info=True)
-            self._conn = None
+            self._ready = False
             return
 
-        if not self._is_child:
-            try:
-                stats = db.catch_up_from_state(self._conn, self._hermes_home)
-                if stats.get("indexed"):
-                    logger.info(
-                        "memohood: catch_up_from_state indexed %d message(s) in %d batch(es)",
-                        stats["indexed"], stats["batches"],
-                    )
-            except Exception:  # noqa: BLE001 - a backfill hiccup must not fail agent startup
-                logger.warning("memohood.initialize: catch_up_from_state failed", exc_info=True)
+        try:
+            if not self._is_child:
+                try:
+                    stats = db.catch_up_from_state(conn, self._hermes_home)
+                    if stats.get("indexed"):
+                        logger.info(
+                            "memohood: catch_up_from_state indexed %d message(s) in %d batch(es)",
+                            stats["indexed"], stats["batches"],
+                        )
+                except Exception:  # noqa: BLE001 - a backfill hiccup must not fail agent startup
+                    logger.warning("memohood.initialize: catch_up_from_state failed", exc_info=True)
+        finally:
+            conn.close()
+        self._ready = True
+
+    def _connect(self) -> Any:
+        """Short-lived connection for the CURRENT thread (schema already ensured in initialize)."""
+        return db.get_connection(hermes_home=self._hermes_home, ensure_schema=False)
+
+    def _spawn(self, target: Any, *, name: str) -> None:
+        if _spawn_context_thread is not None:
+            t = _spawn_context_thread(target, name=name, daemon=True)
+        else:
+            t = threading.Thread(target=target, daemon=True, name=name)
+        t.start()
+        self._track_thread(t)
 
     def system_prompt_block(self) -> str:
-        if self._is_child or self._conn is None:
+        if self._is_child or not self._ready:
             return ""
         return _SYSTEM_PROMPT_BLOCK
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        if self._is_child or self._conn is None:
+        # hermes builds the tool routing table from this list in add_provider(),
+        # BEFORE initialize() runs -- so it must not depend on init state, or the
+        # model sees the tools but every call fails with "Unknown tool".
+        if self._is_child:
             return []
         from . import tools as memohood_tools
 
         return memohood_tools.ALL_TOOL_SCHEMAS
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs: Any) -> str:
-        if self._conn is None:
+        if not self._ready:
             return "memohood: memory.db не инициализирована."
         from . import tools as memohood_tools
 
         session_id = kwargs.get("session_id") or self._session_id
-        return memohood_tools.dispatch(tool_name, args, conn=self._conn, cfg=self._cfg, session_id=session_id)
+        try:
+            conn = self._connect()
+        except db.DbError:
+            logger.error("memohood.handle_tool_call: failed to open memory.db", exc_info=True)
+            return "memohood: не удалось открыть memory.db."
+        try:
+            return memohood_tools.dispatch(tool_name, args, conn=conn, cfg=self._cfg, session_id=session_id)
+        finally:
+            conn.close()
 
     # -- recall -----------------------------------------------------------------
 
@@ -233,7 +264,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
         return "\n".join(lines)
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        if self._is_child or self._conn is None:
+        if self._is_child or not self._ready:
             return ""
         key = session_id or self._session_id or "-"
         with self._prefetch_lock:
@@ -241,10 +272,17 @@ class MemoHoodMemoryProvider(MemoryProvider):
         if cached is not None:
             return cached
         try:
-            return self._compute_prefetch_text(self._conn, query)
+            conn = self._connect()
+        except db.DbError:
+            logger.warning("memohood.prefetch: failed to open memory.db", exc_info=True)
+            return ""
+        try:
+            return self._compute_prefetch_text(conn, query)
         except Exception:  # noqa: BLE001 - prefetch must never fail a turn
             logger.warning("memohood.prefetch: unexpected error", exc_info=True)
             return ""
+        finally:
+            conn.close()
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         if self._is_child or self._hermes_home is None:
@@ -267,9 +305,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
             with self._prefetch_lock:
                 self._prefetch_cache[key] = text
 
-        t = threading.Thread(target=_run, daemon=True, name="memohood-prefetch")
-        t.start()
-        self._track_thread(t)
+        self._spawn(_run, name="memohood-prefetch")
 
     # -- capture ------------------------------------------------------------------
 
@@ -310,14 +346,17 @@ class MemoHoodMemoryProvider(MemoryProvider):
             finally:
                 conn.close()
 
-        t = threading.Thread(target=_run, daemon=True, name="memohood-sync-turn")
-        t.start()
-        self._track_thread(t)
+        self._spawn(_run, name="memohood-sync-turn")
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
-        if self._is_child or self._conn is None or not messages:
+        if self._is_child or not self._ready or not messages:
             return ""
         rescued: List[str] = []
+        try:
+            conn = self._connect()
+        except db.DbError:
+            logger.warning("memohood.on_pre_compress: failed to open memory.db", exc_info=True)
+            return ""
         try:
             threshold = float(self._cfg.get("capture_threshold", 4.0))
             for msg in messages:
@@ -329,12 +368,14 @@ class MemoHoodMemoryProvider(MemoryProvider):
                 if sig["score"] < threshold:
                     continue  # only rescue DEFINITE-KEEP insights here -- no LLM calls during compression
                 result = capture_mod.extract_and_store(
-                    self._conn, content, side=side, session_id=self._session_id, cfg=self._cfg,
+                    conn, content, side=side, session_id=self._session_id, cfg=self._cfg,
                 )
                 if result and result.get("capture_id"):
                     rescued.append(content[:200])
         except Exception:  # noqa: BLE001
             logger.warning("memohood.on_pre_compress: rescue pass failed", exc_info=True)
+        finally:
+            conn.close()
 
         if not rescued:
             return ""
@@ -386,9 +427,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
             finally:
                 conn.close()
 
-        t = threading.Thread(target=_run, daemon=True, name="memohood-memwrite")
-        t.start()
-        self._track_thread(t)
+        self._spawn(_run, name="memohood-memwrite")
 
     def on_delegation(self, task: str, result: str, *, child_session_id: str = "", **kwargs: Any) -> None:
         if self._is_child or self._hermes_home is None or not task:
@@ -412,9 +451,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
             finally:
                 conn.close()
 
-        t = threading.Thread(target=_run, daemon=True, name="memohood-delegation")
-        t.start()
-        self._track_thread(t)
+        self._spawn(_run, name="memohood-delegation")
 
     # -- config / setup ---------------------------------------------------------
 
@@ -466,12 +503,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
 
     def shutdown(self) -> None:
         self._join_background(timeout=3.0)
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except Exception:  # noqa: BLE001
-                logger.debug("memohood.shutdown: error closing memory.db", exc_info=True)
-            self._conn = None
+        self._ready = False
 
     def _join_background(self, *, timeout: float) -> None:
         with self._bg_lock:

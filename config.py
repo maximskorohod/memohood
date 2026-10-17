@@ -211,13 +211,12 @@ def save_memohood_config_at(values: Dict[str, Any], hermes_home: str) -> None:
     config_path = Path(hermes_home) / "config.yaml"
     existing: Dict[str, Any] = {}
     if config_path.exists():
-        try:
-            with open(config_path, encoding="utf-8-sig") as f:
-                existing = yaml.safe_load(f) or {}
-        except Exception:
-            existing = {}
+        # A config.yaml we cannot parse must never be rewritten: dumping only the
+        # memory section back would wipe every other setting of the profile.
+        with open(config_path, encoding="utf-8-sig") as f:
+            existing = yaml.safe_load(f) or {}
     if not isinstance(existing, dict):
-        existing = {}
+        raise ValueError(f"{config_path} is not a YAML mapping; refusing to overwrite it")
 
     memory_section = existing.get("memory", {})
     if not isinstance(memory_section, dict):

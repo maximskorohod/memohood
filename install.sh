@@ -57,6 +57,40 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# --- hermes >= 0.22: package-manager install -------------------------------
+# `hermes` is now a launcher for a bundled Python whose environment is rebuilt
+# by `hermes pm` on every update; packages pip-installed into it (or into the
+# old hermes-agent/venv) are wiped or simply never seen. So on 0.22+ this
+# script only copies the plugin and selects it -- dependencies come from
+# plugin.yaml's pip_dependencies through hermes' own package manager.
+if command -v hermes >/dev/null 2>&1 && hermes --print-runtime-command >/dev/null 2>&1; then
+    HERMES_HOME_RESOLVED="${HERMES_HOME:-$HOME/.hermes}"
+    TARGET_DIR="$HERMES_HOME_RESOLVED/plugins/memohood"
+    mkdir -p "$TARGET_DIR"
+    SOURCE_REAL="$(cd "$SCRIPT_DIR" && pwd -P)"
+    TARGET_REAL="$(cd "$TARGET_DIR" && pwd -P)"
+    if [ "$SOURCE_REAL" != "$TARGET_REAL" ]; then
+        echo "MemoHood: копирую плагин в $TARGET_DIR"
+        cp -a "$SOURCE_REAL"/. "$TARGET_DIR"/
+        rm -rf "$TARGET_DIR/.git"
+        find "$TARGET_DIR" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+    fi
+    if [ "$SKIP_CONFIG" != "1" ]; then
+        hermes config set memory.provider memohood >/dev/null
+        echo "MemoHood: memory.provider = memohood"
+    fi
+    if [ "$INSTALL_LOCAL" = "1" ]; then
+        echo "MemoHood: --local на hermes 0.22+ пока не поддержан установщиком (fastembed нельзя"
+        echo "  поставить pip'ом в управляемое окружение). Используйте Cloudflare-эмбеддинги."
+    fi
+    echo ""
+    echo "Готово. Дальше:"
+    echo "  hermes memory setup memohood   # зависимости через пакетный менеджер hermes + ключи"
+    echo "  hermes gateway restart         # если работает гейтвей"
+    echo "  hermes memohood status"
+    exit 0
+fi
+
 resolve_hermes_venv_python() {
     if [ -n "$PYTHON_OVERRIDE" ]; then
         if [ -x "$PYTHON_OVERRIDE" ]; then

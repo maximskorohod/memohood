@@ -73,6 +73,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from ._engine import ledger as ledger_mod
+from ._engine.secrets import get_env
 from ._engine.security import DEFAULT_USER_AGENT, fence_untrusted, scan_secrets
 
 logger = logging.getLogger("memohood.extract_llm")
@@ -206,7 +207,7 @@ def _call_gemini(
     return the parsed JSON object from the reply. Raises
     :class:`ExtractError` on missing credentials, network failure after
     retries, a non-2xx response, or an unparseable reply."""
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = get_env("GEMINI_API_KEY")
     if not api_key:
         raise ExtractError("GEMINI_API_KEY not set in environment")
 

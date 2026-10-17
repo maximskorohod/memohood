@@ -844,6 +844,7 @@ def catch_up_from_state(
                 SELECT id, session_id, role, content, timestamp
                   FROM messages
                  WHERE id > ? AND active = 1
+                   AND role IN ('user', 'assistant')
                  ORDER BY id
                  LIMIT ?
                 """,
