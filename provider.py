@@ -348,7 +348,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
         session_id: str = "",
         messages: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
-        if self._is_child or self._hermes_home is None:
+        if self._is_child or not self._ready:
             return
         if not (user_content or "").strip() and not (assistant_content or "").strip():
             return
@@ -361,7 +361,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
 
         def _run() -> None:
             try:
-                conn = db.get_connection(hermes_home=hermes_home)
+                conn = db.get_connection(hermes_home=hermes_home, ensure_schema=False)  # schema: initialize()
             except db.DbError:
                 logger.warning("memohood.sync_turn: failed to open memory.db", exc_info=True)
                 return
@@ -446,7 +446,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        if self._is_child or self._hermes_home is None or action != "add" or not content:
+        if self._is_child or not self._ready or action != "add" or not content:
             return
         hermes_home = self._hermes_home
         cfg = self._cfg
@@ -455,7 +455,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
 
         def _run() -> None:
             try:
-                conn = db.get_connection(hermes_home=hermes_home)
+                conn = db.get_connection(hermes_home=hermes_home, ensure_schema=False)  # schema: initialize()
             except db.DbError:
                 return
             try:
@@ -470,7 +470,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
         self._spawn(_run, name="memohood-memwrite")
 
     def on_delegation(self, task: str, result: str, *, child_session_id: str = "", **kwargs: Any) -> None:
-        if self._is_child or self._hermes_home is None or not task:
+        if self._is_child or not self._ready or not task:
             return
         hermes_home = self._hermes_home
         cfg = self._cfg
@@ -479,7 +479,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
 
         def _run() -> None:
             try:
-                conn = db.get_connection(hermes_home=hermes_home)
+                conn = db.get_connection(hermes_home=hermes_home, ensure_schema=False)  # schema: initialize()
             except db.DbError:
                 return
             try:

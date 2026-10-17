@@ -328,7 +328,11 @@ def get_connection(*, hermes_home: Optional[str | Path] = None, read_only: bool 
     """
     conn = connect(db_path=db_path, hermes_home=hermes_home, read_only=read_only)
     if ensure_schema and not read_only:
-        init_schema(conn)
+        try:
+            init_schema(conn)
+        except BaseException:
+            conn.close()  # the caller never gets the handle, so it could not close it
+            raise
     return conn
 
 
@@ -355,19 +359,16 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
 
 def _ensure_meta_defaults(conn: sqlite3.Connection) -> None:
-    row = conn.execute("SELECT value FROM _meta WHERE key = 'schema_version'").fetchone()
-    if row is None:
-        with conn:
-            conn.execute(
-                "INSERT INTO _meta(key, value) VALUES ('schema_version', ?)",
-                (str(SCHEMA_VERSION),),
-            )
-    watermark_row = conn.execute("SELECT value FROM _meta WHERE key = 'last_indexed_message_id'").fetchone()
-    if watermark_row is None:
-        with conn:
-            conn.execute(
-                "INSERT INTO _meta(key, value) VALUES ('last_indexed_message_id', '0')",
-            )
+    # INSERT OR IGNORE, not SELECT-then-INSERT: two agents initializing the same
+    # memory.db at once would otherwise race into a UNIQUE constraint failure.
+    with conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO _meta(key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO _meta(key, value) VALUES ('last_indexed_message_id', '0')",
+        )
 
 
 def get_schema_version(conn: sqlite3.Connection) -> int:
@@ -789,7 +790,7 @@ def _get_watermark(conn: sqlite3.Connection) -> int:
 
 def _set_watermark(conn: sqlite3.Connection, message_id: int) -> None:
     """Write the watermark. Caller is expected to already be inside a
-    ``with conn:`` transaction block (see ``catch_up_from_state``'s loop) so
+    transaction (``catch_up_from_state``'s per-batch BEGIN IMMEDIATE) so
     the watermark update commits atomically together with the
     ``messages_fts`` inserts for the same batch — this function does NOT
     open its own transaction, to avoid a redundant nested commit."""
@@ -868,32 +869,40 @@ def catch_up_from_state(
     watermark = watermark_before
     try:
         for _ in range(max_batches):
-            rows = state_conn.execute(
-                """
-                SELECT id, session_id, role, content, timestamp
-                  FROM messages
-                 WHERE id > ? AND active = 1
-                   AND role IN ('user', 'assistant')
-                 ORDER BY id
-                 LIMIT ?
-                """,
-                (watermark, batch_size),
-            ).fetchall()
-            if not rows:
-                break
+            # Each batch is one BEGIN IMMEDIATE transaction that RE-READS the
+            # watermark under the write lock: two agents initializing at once
+            # would otherwise both index the same range (duplicate messages_fts rows).
+            if conn.in_transaction:
+                conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                watermark = _get_watermark(conn)
+                rows = state_conn.execute(
+                    """
+                    SELECT id, session_id, role, content, timestamp
+                      FROM messages
+                     WHERE id > ? AND active = 1
+                       AND role IN ('user', 'assistant')
+                     ORDER BY id
+                     LIMIT ?
+                    """,
+                    (watermark, batch_size),
+                ).fetchall()
+                if not rows:
+                    conn.commit()
+                    break
 
-            to_insert = []
-            for row in rows:
-                text = _decode_message_content(row["content"]).strip()
-                if text:
-                    to_insert.append(
-                        (text, stem_mod.stem_ru(text), row["id"], row["session_id"], row["role"], row["timestamp"])
-                    )
-                else:
-                    stats["skipped_empty"] += 1
+                to_insert = []
+                for row in rows:
+                    text = _decode_message_content(row["content"]).strip()
+                    if text:
+                        to_insert.append(
+                            (text, stem_mod.stem_ru(text), row["id"], row["session_id"], row["role"], row["timestamp"])
+                        )
+                    else:
+                        stats["skipped_empty"] += 1
 
-            watermark = rows[-1]["id"]
-            with conn:
+                watermark = rows[-1]["id"]
                 if to_insert:
                     conn.executemany(
                         "INSERT INTO messages_fts(content, content_stem, message_id, session_id, role, timestamp) "
@@ -901,6 +910,10 @@ def catch_up_from_state(
                         to_insert,
                     )
                 _set_watermark(conn, watermark)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
 
             stats["indexed"] += len(to_insert)
             stats["batches"] += 1
