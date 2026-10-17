@@ -101,7 +101,7 @@ def memohood_fetch(args: Dict[str, Any], *, conn: Any, cfg: Dict[str, Any], sess
     if row["invalidated_at"]:
         lines.append("(эта запись замещена/архивирована и не участвует в обычном recall)")
     if row["history"]:
-        lines.append("История:\n" + row["history"])
+        lines.append("История:\n" + security.fence_untrusted(row["history"], source="memohood-fetch-history"))
     return "\n".join(lines)
 
 
@@ -145,18 +145,20 @@ def memohood_recall(args: Dict[str, Any], *, conn: Any, cfg: Dict[str, Any], ses
     if not captures and not messages:
         return "Ничего не найдено в памяти."
 
-    lines: List[str] = []
+    # Same data-not-instructions rendering as the automatic recall block;
+    # memohood_fetch returns a capture in full.
+    lines: List[str] = [security.RECALL_DATA_NOTE]
     if captures:
         lines.append("Факты/решения:")
         for c in captures:
             tag = "[закреплено] " if c.get("pinned") else ""
-            lines.append(f"- {tag}[{c['kind']}] {c['text']}")
+            lines.append(f"- {tag}[capture:{c['capture_id']}] [{c['kind']}] {security.inline_data(c['text'], limit=500)}")
     if messages:
-        if lines:
+        if captures:
             lines.append("")
         lines.append("Из истории диалогов:")
         for m in messages:
-            lines.append(f"- ({m.get('role')}) {(m.get('content') or '')[:300]}")
+            lines.append(f"- ({m.get('role')}) {security.inline_data(m.get('content') or '')}")
     return "\n".join(lines)
 
 

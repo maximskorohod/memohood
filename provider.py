@@ -73,6 +73,7 @@ from . import graph_rerank as graph_rerank_mod
 from . import post_recall
 from . import query_norm
 from ._engine import retrieve as retrieve_mod
+from ._engine import security
 
 logger = logging.getLogger("memohood.provider")
 
@@ -275,20 +276,20 @@ class MemoHoodMemoryProvider(MemoryProvider):
         self._reinforce(conn, captures)
         self._last_recall_count = len(captures) + len(messages)
 
-        lines: List[str] = []
+        # Recalled items are rendered as data: one flattened, capped line each.
+        lines: List[str] = [security.RECALL_DATA_NOTE]
         if captures:
             lines.append("Воспоминания (факты/решения из прошлых разговоров):")
             for c in captures:
                 tag = "[закреплено] " if c.get("pinned") else ""
-                lines.append(f"- {tag}[{c.get('kind')}] {c.get('text')}")
+                lines.append(f"- {tag}[{c.get('kind')}] {security.inline_data(c.get('text') or '')}")
         if messages:
-            if lines:
+            if captures:
                 lines.append("")
             lines.append("Похожие места в истории диалога:")
             for m in messages:
                 role = m.get("role") or "?"
-                content = (m.get("content") or "")[:300]
-                lines.append(f"- ({role}) {content}")
+                lines.append(f"- ({role}) {security.inline_data(m.get('content') or '')}")
         return "\n".join(lines)
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
