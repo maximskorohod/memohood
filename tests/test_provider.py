@@ -238,3 +238,39 @@ class TestRecallHygiene:
         n = _conn(p).execute("SELECT COUNT(*) AS n FROM captures WHERE invalidated_at IS NULL").fetchone()["n"]
         assert n == 0
         p.shutdown()
+
+
+class TestAuditFixes:
+    def test_prefetch_never_serves_previous_query(self, memohood):
+        p = _make_provider(memohood)
+        memohood.capture.manual_capture(
+            _conn(p), "Мы подписали договор с новым поставщиком оборудования",
+            kind="decision", notability="high", pinned=False, session_id="s1", cfg=p._cfg,
+        )
+        p.queue_prefetch("расскажи про договора с поставщиком", session_id="s1")
+        p._join_background(timeout=5.0)
+        assert p.prefetch("совершенно несвязанный запрос без совпадений", session_id="s1") == ""
+        p.shutdown()
+
+    def test_recall_status_reflects_last_prefetch(self, memohood):
+        p = _make_provider(memohood)
+        memohood.capture.manual_capture(
+            _conn(p), "Мы подписали договор с новым поставщиком оборудования",
+            kind="decision", notability="high", pinned=False, session_id="s1", cfg=p._cfg,
+        )
+        assert p.prefetch("расскажи про договора с поставщиком", session_id="s1")
+        st = p.recall_status()
+        assert st is not None and st.count >= 1
+        assert p.prefetch("совершенно несвязанный запрос без совпадений", session_id="s1") == ""
+        assert p.recall_status() is None
+        p.shutdown()
+
+    def test_pre_compress_rescues_are_bounded(self, memohood, monkeypatch):
+        p = _make_provider(memohood)
+        calls = []
+        orig = memohood.capture.extract_and_store
+        monkeypatch.setattr(memohood.capture, "extract_and_store", lambda *a, **kw: calls.append(1) or orig(*a, **kw))
+        msgs = [{"role": "user", "content": f"Запомни навсегда: факт номер {i} про проект"} for i in range(20)]
+        p.on_pre_compress(msgs)
+        assert len(calls) <= 5
+        p.shutdown()

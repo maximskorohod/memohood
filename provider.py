@@ -44,6 +44,20 @@ try:  # hermes >= 0.22: background jobs must inherit the caller's contextvars (p
 except ImportError:  # older hermes: plain thread, no profile scope to inherit
     _spawn_context_thread = None
 
+try:  # hermes >= 0.22: deterministic "🧠 MemoHood — recalled N memories" indicator
+    from agent.memory_provider import RecallStatus as _RecallStatus
+except ImportError:
+    _RecallStatus = None
+
+# hermes >= 0.22 already runs sync_turn on its own single background worker,
+# which also serializes a provider's writes (turn N before N+1). Spawning another
+# thread there would let two turns capture concurrently (duplicate facts, broken
+# SUPERSEDE chains). Older hermes called sync_turn on the turn thread.
+_HOST_RUNS_SYNC_IN_BACKGROUND = _spawn_context_thread is not None
+
+# on_pre_compress runs on the compression path: bound the per-message network work.
+_MAX_PRECOMPRESS_RESCUES = 5
+
 from . import capture as capture_mod
 from . import config as memohood_config
 from . import db
@@ -83,7 +97,10 @@ class MemoHoodMemoryProvider(MemoryProvider):
         self._is_child = False
         self._agent_context = "primary"
 
-        self._prefetch_cache: Dict[str, str] = {}
+        # session key -> (query, text) of the LAST inline recall; served only for
+        # the same query (hermes may re-ask within a turn), never for the next one.
+        self._prefetch_cache: Dict[str, tuple] = {}
+        self._last_recall_count = 0
         self._prefetch_lock = threading.Lock()
         self._bg_threads: List[threading.Thread] = []
         self._bg_lock = threading.Lock()
@@ -246,6 +263,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
             return ""
 
         self._reinforce(conn, captures)
+        self._last_recall_count = len(captures) + len(messages)
 
         lines: List[str] = []
         if captures:
@@ -264,48 +282,45 @@ class MemoHoodMemoryProvider(MemoryProvider):
         return "\n".join(lines)
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
+        self._last_recall_count = 0
         if self._is_child or not self._ready:
             return ""
         key = session_id or self._session_id or "-"
+        query = (query or "").strip()
         with self._prefetch_lock:
-            cached = self._prefetch_cache.pop(key, None)
-        if cached is not None:
-            return cached
+            cached = self._prefetch_cache.get(key)
+        if cached is not None and cached[0] == query:
+            self._last_recall_count = cached[2]
+            return cached[1]
         try:
             conn = self._connect()
         except db.DbError:
             logger.warning("memohood.prefetch: failed to open memory.db", exc_info=True)
             return ""
         try:
-            return self._compute_prefetch_text(conn, query)
+            text = self._compute_prefetch_text(conn, query)
         except Exception:  # noqa: BLE001 - prefetch must never fail a turn
             logger.warning("memohood.prefetch: unexpected error", exc_info=True)
             return ""
         finally:
             conn.close()
+        if not text:
+            self._last_recall_count = 0
+        with self._prefetch_lock:
+            self._prefetch_cache[key] = (query, text, self._last_recall_count)
+        return text
+
+    def recall_status(self) -> Optional[Any]:
+        if _RecallStatus is None or self._last_recall_count <= 0:
+            return None
+        return _RecallStatus("MemoHood", self._last_recall_count)
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        if self._is_child or self._hermes_home is None:
-            return
-        key = session_id or self._session_id or "-"
-        hermes_home = self._hermes_home
-
-        def _run() -> None:
-            try:
-                conn = db.get_connection(hermes_home=hermes_home)
-            except db.DbError:
-                return
-            try:
-                text = self._compute_prefetch_text(conn, query)
-            except Exception:  # noqa: BLE001
-                logger.debug("memohood.queue_prefetch: background compute failed", exc_info=True)
-                return
-            finally:
-                conn.close()
-            with self._prefetch_lock:
-                self._prefetch_cache[key] = text
-
-        self._spawn(_run, name="memohood-prefetch")
+        # Intentionally a no-op. hermes calls this after turn N with turn N's text;
+        # a result precomputed for that text was then served on turn N+1 -- recall
+        # for the PREVIOUS message. memohood's recall is local and fast enough to
+        # run inline in prefetch() for the actual current query.
+        return
 
     # -- capture ------------------------------------------------------------------
 
@@ -337,7 +352,7 @@ class MemoHoodMemoryProvider(MemoryProvider):
             try:
                 conn = db.get_connection(hermes_home=hermes_home)
             except db.DbError:
-                logger.warning("memohood.sync_turn: failed to open memory.db in background thread", exc_info=True)
+                logger.warning("memohood.sync_turn: failed to open memory.db", exc_info=True)
                 return
             try:
                 capture_mod.process_turn(conn, user_content, assistant_content, session_id=sid, cfg=cfg)
@@ -346,7 +361,10 @@ class MemoHoodMemoryProvider(MemoryProvider):
             finally:
                 conn.close()
 
-        self._spawn(_run, name="memohood-sync-turn")
+        if _HOST_RUNS_SYNC_IN_BACKGROUND:
+            _run()  # already on hermes' serialized background worker
+        else:
+            self._spawn(_run, name="memohood-sync-turn")
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         if self._is_child or not self._ready or not messages:
@@ -359,14 +377,19 @@ class MemoHoodMemoryProvider(MemoryProvider):
             return ""
         try:
             threshold = float(self._cfg.get("capture_threshold", 4.0))
+            # Only DEFINITE-KEEP messages (free signal score >= threshold) -- no
+            # extraction LLM call. Storing still embeds each one (and may run the
+            # near-duplicate judge), so the newest few are rescued, not all.
+            candidates = []
             for msg in messages:
                 content = msg.get("content")
                 if not isinstance(content, str) or not content.strip():
                     continue
                 side = "assistant" if msg.get("role") == "assistant" else "user"
                 sig = capture_mod.compute_signals(content, side=side)
-                if sig["score"] < threshold:
-                    continue  # only rescue DEFINITE-KEEP insights here -- no LLM calls during compression
+                if sig["score"] >= threshold:
+                    candidates.append((content, side))
+            for content, side in candidates[-_MAX_PRECOMPRESS_RESCUES:]:
                 result = capture_mod.extract_and_store(
                     conn, content, side=side, session_id=self._session_id, cfg=self._cfg,
                 )
