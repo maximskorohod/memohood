@@ -11,7 +11,7 @@
 <h3 align="center">🌐 <a href="README.md">Русский</a> · English</h3>
 
 <p align="center">
-  <a href="https://www.youtube.com/@MaximSkorohood"><img alt="YouTube: @MaximSkorohood" src="https://img.shields.io/badge/YouTube-%40MaximSkorohood-FF0000?logo=youtube&logoColor=white"></a>
+  <a href="https://www.youtube.com/@MaximSkorohod"><img alt="YouTube: @MaximSkorohod" src="https://img.shields.io/badge/YouTube-%40MaximSkorohod-FF0000?logo=youtube&logoColor=white"></a>
   <a href="https://t.me/+XrhmiKgCQdY5MjFi"><img alt="Telegram" src="https://img.shields.io/badge/Telegram-community-26A5E4?logo=telegram&logoColor=white"></a>
   <a href="https://skorehood.com"><img alt="skorehood.com" src="https://img.shields.io/badge/skorehood.com-0A0A0A?logo=googlechrome&logoColor=white"></a>
 </p>
@@ -291,8 +291,8 @@ A practical guide to installation, diagnostics, and how fact capture works is in
 
 ## Made by
 
-Built by **Maxim Vasko** — [skorehood.com](https://skorehood.com) · [YouTube](https://www.youtube.com/@MaximSkorohood) · [Telegram](https://t.me/+XrhmiKgCQdY5MjFi)
+Built by **Maxim Skorohod** — [skorehood.com](https://skorehood.com) · [YouTube](https://www.youtube.com/@MaximSkorohod) · [Telegram](https://t.me/+XrhmiKgCQdY5MjFi)
 
 ## License
 
-MIT — copyright © 2026 Maxim Vasko. Full text in [`LICENSE`](LICENSE).
+MIT — copyright © 2026 Maxim Skorohod. Full text in [`LICENSE`](LICENSE).
