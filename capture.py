@@ -411,8 +411,12 @@ def _store_capture(
     "capture_id": str, "supersedes": str|None}``.
     """
     candidates, new_vec = _nearest_captures(conn, content, cfg, k=5)
-    if not candidates:
-        candidates = _fts_dup_candidates(conn, content, limit=5)
+    if not candidates or candidates[0]["cosine"] < _DUP_COSINE_LO:
+        # A low vector top does not rule out a duplicate: captures written while
+        # the embedder was down have no vector at all and are only in FTS.
+        fts_candidates = _fts_dup_candidates(conn, content, limit=5)
+        if fts_candidates and (not candidates or fts_candidates[0]["cosine"] > candidates[0]["cosine"]):
+            candidates = fts_candidates
 
     action = "independent"
     supersedes_id: Optional[str] = None
@@ -447,6 +451,7 @@ def _store_capture(
             try:
                 with conn:
                     conn.execute("UPDATE captures SET invalidated_at = ? WHERE id = ?", (now, supersedes_id))
+                    db.drop_capture_from_indexes(conn, [supersedes_id])
             except sqlite3.Error:
                 logger.warning("capture: failed to invalidate superseded capture %s", supersedes_id, exc_info=True)
                 action = "independent"

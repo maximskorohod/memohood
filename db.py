@@ -641,6 +641,30 @@ def swap_vec_table(conn: sqlite3.Connection, dims: int) -> None:
         raise DbError(f"failed to swap captures_vec tables: {exc}") from exc
 
 
+def drop_capture_from_indexes(conn: sqlite3.Connection, capture_ids: List[str]) -> None:
+    """Remove invalidated captures from ``captures_fts`` and ``captures_vec``.
+
+    Call it INSIDE the same ``with conn:`` transaction that sets
+    ``invalidated_at``, so a superseded/archived/merged capture never keeps
+    occupying FTS/KNN result slots (retrieve's hydration would drop it, but
+    only after it had already pushed live candidates out of the top-k).
+    A vec delete failure (sqlite-vec not loadable on this connection) is
+    logged, not raised -- the FTS cleanup and the invalidation still commit.
+    """
+    ids = [cid for cid in capture_ids if cid]
+    if not ids:
+        return
+    placeholders = ",".join("?" for _ in ids)
+    conn.execute(f"DELETE FROM captures_fts WHERE capture_id IN ({placeholders})", ids)
+    if not vec_table_exists(conn):
+        return
+    try:
+        for cid in ids:
+            conn.execute(f"DELETE FROM {vec_table_name()} WHERE capture_id = ?", (cid,))
+    except sqlite3.Error:
+        logger.warning("drop_capture_from_indexes: vec delete failed for %d capture(s)", len(ids), exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Spend ledger CRUD (backs `_engine/ledger.py`)
 # ---------------------------------------------------------------------------

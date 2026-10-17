@@ -142,6 +142,7 @@ def run_decay(conn: sqlite3.Connection, cfg: Dict[str, Any]) -> Dict[str, int]:
                         "UPDATE captures SET confidence = ?, invalidated_at = ?, tags = ?, updated_at = ? WHERE id = ?",
                         (new_conf, now, new_tags, now, r["id"]),
                     )
+                    db.drop_capture_from_indexes(conn, [r["id"]])
                 archived_count += 1
             except sqlite3.Error:
                 logger.warning("consolidate.run_decay: failed to archive %s", r["id"], exc_info=True)
@@ -214,6 +215,7 @@ def _run_dedup_vec(conn: sqlite3.Connection) -> int:
                             "UPDATE captures SET invalidated_at = ?, tags = ? WHERE id = ?",
                             (now, new_tags, other),
                         )
+                        db.drop_capture_from_indexes(conn, [other])
                     seen.add(other)
                     merged += 1
                 except sqlite3.Error:
@@ -244,6 +246,7 @@ def _run_dedup_fallback(conn: sqlite3.Connection) -> int:
                         "UPDATE captures SET invalidated_at = ?, tags = tags || ';dedup_merged' WHERE id = ?",
                         (now, r["id"]),
                     )
+                    db.drop_capture_from_indexes(conn, [r["id"]])
                 merged += 1
             except sqlite3.Error:
                 logger.debug("consolidate.run_dedup: fallback merge failed for %s", r["id"], exc_info=True)
