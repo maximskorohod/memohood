@@ -99,7 +99,7 @@ def _print_status(hermes_home: str) -> None:
     conn = db.get_connection(hermes_home=hermes_home)
     try:
         cfg = memohood_config.get_memohood_config_readonly()
-        print(memohood_tools.memohood_stats({}, conn=conn, cfg=cfg, session_id=None))
+        print(memohood_tools.memohood_stats({}, conn=conn, cfg=cfg, session_id=None, key_details=True))
     finally:
         conn.close()
 

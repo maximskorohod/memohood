@@ -122,6 +122,37 @@ class TestUpsertEnvVar:
         assert "COHERE_API_KEY=новое-значение" in text
         assert "старое-значение" not in text
 
+    @pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX file modes")
+    def test_written_file_is_private_and_no_temp_left(self, memohood, tmp_path):
+        import os
+        import stat
+
+        sw = _wizard(memohood)
+        env = tmp_path / "home" / ".env"
+        env.parent.mkdir()
+        env.write_text("A=1\n", encoding="utf-8")
+        os.chmod(env, 0o644)
+        sw.upsert_env_var(env, "GEMINI_API_KEY", "secret-value")
+        assert stat.S_IMODE(env.stat().st_mode) == 0o600
+        assert sorted(p.name for p in env.parent.iterdir()) == [".env"]
+
+    def test_failed_write_keeps_original_file(self, memohood, tmp_path, monkeypatch):
+        import os
+
+        sw = _wizard(memohood)
+        env = tmp_path / "home" / ".env"
+        env.parent.mkdir()
+        env.write_text("A=1\n", encoding="utf-8")
+
+        def boom(*a, **kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(os, "replace", boom)
+        with pytest.raises(OSError):
+            sw.upsert_env_var(env, "GEMINI_API_KEY", "x")
+        assert env.read_text(encoding="utf-8") == "A=1\n"
+        assert sorted(p.name for p in env.parent.iterdir()) == [".env"]
+
 
 # ---------------------------------------------------------------------------
 # Validators

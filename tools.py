@@ -171,7 +171,12 @@ MEMOHOOD_STATS_SCHEMA: Dict[str, Any] = {
 }
 
 
-def memohood_stats(args: Dict[str, Any], *, conn: Any, cfg: Dict[str, Any], session_id: Optional[str] = None) -> str:
+def memohood_stats(
+    args: Dict[str, Any], *, conn: Any, cfg: Dict[str, Any], session_id: Optional[str] = None,
+    key_details: bool = False,
+) -> str:
+    # key_details=True only from the CLI (`hermes memohood stats`): key prefixes and
+    # the systemd probe stay out of the agent tool output.
     lines: List[str] = []
     total = conn.execute("SELECT COUNT(*) AS n FROM captures WHERE invalidated_at IS NULL").fetchone()["n"]
     pinned = conn.execute(
@@ -198,7 +203,7 @@ def memohood_stats(args: Dict[str, Any], *, conn: Any, cfg: Dict[str, Any], sess
 
     try:
         from . import setup_wizard
-        block = setup_wizard.format_keys_block(cfg)
+        block = setup_wizard.format_keys_block(cfg, details=key_details)
         if block:
             lines.append("")
             lines.append(block)

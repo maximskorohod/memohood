@@ -59,6 +59,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # the production calls, so a wizard live-check always tests the very same
 # endpoint the plugin will use afterwards (no drift).
 from ._engine.rerank import COHERE_RERANK_URL, DEFAULT_MODEL as COHERE_MODEL
+from ._engine.secrets import get_env
 from ._engine.security import DEFAULT_USER_AGENT
 from .extract_llm import DEFAULT_MODEL as GEMINI_MODEL, GEMINI_OPENAI_COMPAT_URL
 
@@ -178,8 +179,35 @@ def upsert_env_var(path: "str | Path", key: str, value: str) -> str:
             lines.append(new_line)
 
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    _atomic_write_private(p, "\n".join(lines) + "\n")
     return action
+
+
+def _atomic_write_private(path: Path, text: str) -> None:
+    """Write *text* to *path* via a same-directory temp file + ``os.replace``,
+    mode 0600 from creation (``mkstemp``) -- a crash mid-write never leaves a
+    truncated ``.env``, and the secrets are never world-readable, not even
+    for a moment. An existing file is replaced, so its old (possibly 0644)
+    mode is gone too."""
+    import tempfile
+
+    fd, tmp = tempfile.mkstemp(prefix=".env.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    try:
+        os.chmod(path, 0o600)
+    except OSError:  # e.g. a filesystem without POSIX modes
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -690,7 +718,8 @@ def _read_env_file_values(env_path: Path) -> Dict[str, str]:
 def key_status(env_vars: List[str], *, hermes_home: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
     """Read-only status of each var: ``{VAR: {"in_file","in_process","mask"}}``.
 
-    ``in_process`` reflects what the RUNNING hermes sees (``os.environ``); a key
+    ``in_process`` reflects what the RUNNING hermes sees (``_engine.secrets.get_env``:
+    the active profile's secret scope, falling back to ``os.environ``); a key
     present in the file but NOT here means the gateway started before it was
     added and needs a restart (bug B12). ``mask`` is :func:`mask_key`'s
     first-4-chars form (process value preferred, else file), never the full
@@ -699,7 +728,7 @@ def key_status(env_vars: List[str], *, hermes_home: Optional[str] = None) -> Dic
     out: Dict[str, Dict[str, Any]] = {}
     for var in env_vars:
         file_val = file_vals.get(var)
-        proc_raw = os.environ.get(var)
+        proc_raw = get_env(var)
         proc_val = proc_raw if (proc_raw and proc_raw.strip()) else None
         shown = proc_val or file_val
         out[var] = {
@@ -744,11 +773,16 @@ def _restart_hint(hermes_home: Optional[str] = None) -> str:
     return "перезапустите hermes, чтобы подхватить ключи из .env."
 
 
-def format_keys_block(cfg: Dict[str, Any], *, hermes_home: Optional[str] = None) -> str:
+def format_keys_block(cfg: Dict[str, Any], *, hermes_home: Optional[str] = None, details: bool = True) -> str:
     """Render the read-only "Ключи" section for `hermes memohood stats`: the
     ``.env`` path + one line per relevant key — ``✓ настроен`` / ``✗ нет`` / ``⚠``
     when it is in the file but the running process hasn't picked it up. Never
-    prints a full secret; never makes a network call."""
+    prints a full secret; never makes a network call.
+
+    ``details=False`` is the agent-tool rendering (``memohood_stats`` called
+    by the model): status marks only -- no 4-char key prefixes in the model's
+    context, and no ``systemctl`` probe from inside the agent loop. The CLI
+    keeps the full form."""
     catalog = relevant_keys(cfg)
     statuses = key_status([c["env_var"] for c in catalog], hermes_home=hermes_home)
     lines = [f"Ключи (.env: {env_file_path(hermes_home)}):"]
@@ -757,15 +791,17 @@ def format_keys_block(cfg: Dict[str, Any], *, hermes_home: Optional[str] = None)
         var = c["env_var"]
         st = statuses.get(var, {})
         role = f"[{c['role']}{'' if c['required'] else ', опц.'}]"
+        mask = f" ({st['mask']})" if details and st.get("mask") else ""
         if st.get("in_process"):
-            lines.append(f"  {var} — ✓ настроен ({st['mask']}) {role}")
+            lines.append(f"  {var} — ✓ настроен{mask} {role}")
         elif st.get("in_file"):
             stale = True
-            lines.append(f"  {var} — ⚠ есть в .env ({st['mask']}), но процесс не видит {role}")
+            lines.append(f"  {var} — ⚠ есть в .env{mask}, но процесс не видит {role}")
         else:
             lines.append(f"  {var} — ✗ нет {role}")
     if stale:
-        lines.append(f"  ⚠ Часть ключей записана, но не подхвачена процессом: {_restart_hint(hermes_home)}")
+        hint = _restart_hint(hermes_home) if details else "перезапустите hermes, чтобы подхватить ключи из .env."
+        lines.append(f"  ⚠ Часть ключей записана, но не подхвачена процессом: {hint}")
     return "\n".join(lines)
 
 

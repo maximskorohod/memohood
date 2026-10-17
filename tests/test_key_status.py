@@ -148,7 +148,29 @@ class TestStatsIncludesKeys:
         finally:
             conn.close()
         assert "Ключи (.env:" in out
+        # Tool path (the model reads it): status mark only, no key prefix.
+        assert "GEMINI_API_KEY — ✓ настроен [" in out
+        assert "AIza" not in out
+
+    def test_cli_stats_shows_prefix(self, memohood, monkeypatch):
+        monkeypatch.setenv("GEMINI_API_KEY", "AIza_STATSLIVE")
+        conn = memohood.db.get_connection(hermes_home=str(memohood._hermes_home_for_test))
+        try:
+            out = memohood.tools.memohood_stats({}, conn=conn, cfg=_cfg(memohood), session_id=None, key_details=True)
+        finally:
+            conn.close()
         assert "GEMINI_API_KEY — ✓ настроен (AIza…)" in out
+
+    def test_tool_stats_never_probes_systemd(self, memohood, monkeypatch):
+        systemd_env = importlib.import_module(f"{memohood.__name__}.systemd_env")
+
+        probes = []
+        monkeypatch.setattr(systemd_env, "detect_systemd_gateway", lambda **kw: probes.append(1) or True)
+        _sw(memohood).env_file_path().write_text("CLOUDFLARE_API_TOKEN=cfat_ONLYFILE\n", encoding="utf-8")
+        block = _sw(memohood).format_keys_block(_cfg(memohood), details=False)
+        assert probes == []
+        assert "⚠ есть в .env, но процесс не видит" in block
+        assert "cfat" not in block
 
     def test_stats_keys_block_never_leaks_secret(self, memohood, monkeypatch):
         monkeypatch.setenv("GEMINI_API_KEY", "AIza_STATS_SECRETTAIL")
