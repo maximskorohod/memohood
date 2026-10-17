@@ -186,10 +186,34 @@ def _self_knn(conn: sqlite3.Connection, capture_id: str, *, k: int = 6) -> List[
     return out
 
 
+def _merge_into(conn: sqlite3.Connection, victim_id: str, now: float) -> bool:
+    """Invalidate *victim_id* as a dedup duplicate (tag ``dedup_merged``) and
+    drop it from the FTS/vec indexes, in one transaction. False if it was
+    already gone/invalidated."""
+    row = conn.execute("SELECT tags, invalidated_at FROM captures WHERE id = ?", (victim_id,)).fetchone()
+    if row is None or row["invalidated_at"] is not None:
+        return False
+    tags = row["tags"] or ""
+    new_tags = f"{tags};dedup_merged" if tags else "dedup_merged"
+    with conn:
+        conn.execute("UPDATE captures SET invalidated_at = ?, tags = ? WHERE id = ?", (now, new_tags, victim_id))
+        db.drop_capture_from_indexes(conn, [victim_id])
+    return True
+
+
+def _pick_victim(survivor: str, other: str, pinned: Dict[str, bool]) -> Optional[str]:
+    """Which of a duplicate pair to invalidate: a pinned capture is never the
+    victim (it is preferred as the survivor); two pinned ones are both kept."""
+    if pinned.get(other):
+        return None if pinned.get(survivor) else survivor
+    return other
+
+
 def _run_dedup_vec(conn: sqlite3.Connection) -> int:
     rows = conn.execute(
-        "SELECT id FROM captures WHERE invalidated_at IS NULL ORDER BY created_at"
+        "SELECT id, pinned FROM captures WHERE invalidated_at IS NULL ORDER BY created_at"
     ).fetchall()
+    pinned = {r["id"]: bool(r["pinned"]) for r in rows}
     seen: "set[str]" = set()
     merged = 0
     now = db.now()
@@ -199,27 +223,19 @@ def _run_dedup_vec(conn: sqlite3.Connection) -> int:
             continue
         for cand in _self_knn(conn, cid, k=6):
             other = cand["id"]
-            if other == cid or other in seen:
+            if other == cid or other in seen or cand["cosine"] < 0.95:
                 continue
-            if cand["cosine"] >= 0.95:
-                try:
-                    row = conn.execute(
-                        "SELECT tags, invalidated_at FROM captures WHERE id = ?", (other,)
-                    ).fetchone()
-                    if row is None or row["invalidated_at"] is not None:
-                        continue
-                    tags = row["tags"] or ""
-                    new_tags = f"{tags};dedup_merged" if tags else "dedup_merged"
-                    with conn:
-                        conn.execute(
-                            "UPDATE captures SET invalidated_at = ?, tags = ? WHERE id = ?",
-                            (now, new_tags, other),
-                        )
-                        db.drop_capture_from_indexes(conn, [other])
-                    seen.add(other)
+            victim = _pick_victim(cid, other, pinned)
+            if victim is None:
+                continue
+            try:
+                if _merge_into(conn, victim, now):
                     merged += 1
-                except sqlite3.Error:
-                    logger.debug("consolidate.run_dedup: failed to merge %s into %s", other, cid, exc_info=True)
+                seen.add(victim)
+            except sqlite3.Error:
+                logger.debug("consolidate.run_dedup: failed to merge %s (pair %s/%s)", victim, cid, other, exc_info=True)
+            if victim == cid:
+                break  # cid itself was merged into a pinned twin
     return merged
 
 
@@ -230,8 +246,9 @@ def _run_dedup_fallback(conn: sqlite3.Connection) -> int:
     paraphrased duplicates -- acceptable v1 tradeoff when sqlite-vec isn't
     installed/configured."""
     rows = conn.execute(
-        "SELECT id, content FROM captures WHERE invalidated_at IS NULL ORDER BY created_at"
+        "SELECT id, content, pinned FROM captures WHERE invalidated_at IS NULL ORDER BY created_at"
     ).fetchall()
+    pinned = {r["id"]: bool(r["pinned"]) for r in rows}
     seen_keys: Dict[str, str] = {}
     merged = 0
     now = db.now()
@@ -239,18 +256,20 @@ def _run_dedup_fallback(conn: sqlite3.Connection) -> int:
         key = " ".join((r["content"] or "").split()).lower()
         if not key:
             continue
-        if key in seen_keys:
-            try:
-                with conn:
-                    conn.execute(
-                        "UPDATE captures SET invalidated_at = ?, tags = tags || ';dedup_merged' WHERE id = ?",
-                        (now, r["id"]),
-                    )
-                    db.drop_capture_from_indexes(conn, [r["id"]])
+        survivor = seen_keys.get(key)
+        if survivor is None:
+            seen_keys[key] = r["id"]
+            continue
+        victim = _pick_victim(survivor, r["id"], pinned)
+        if victim is None:
+            continue
+        try:
+            if _merge_into(conn, victim, now):
                 merged += 1
-            except sqlite3.Error:
-                logger.debug("consolidate.run_dedup: fallback merge failed for %s", r["id"], exc_info=True)
-        else:
+        except sqlite3.Error:
+            logger.debug("consolidate.run_dedup: fallback merge failed for %s", victim, exc_info=True)
+            continue
+        if victim == survivor:
             seen_keys[key] = r["id"]
     return merged
 

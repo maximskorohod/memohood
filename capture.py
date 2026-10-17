@@ -436,6 +436,13 @@ def _store_capture(
 
     if action == "duplicate" and supersedes_id:
         _touch_last_seen(conn, supersedes_id, now)
+        if pinned:
+            # "запомни навсегда" for a fact we already have must pin the existing row.
+            try:
+                with conn:
+                    conn.execute("UPDATE captures SET pinned = 1 WHERE id = ?", (supersedes_id,))
+            except sqlite3.Error:
+                logger.warning("capture: failed to pin duplicate %s", supersedes_id, exc_info=True)
         return {"action": "duplicate", "capture_id": supersedes_id, "supersedes": None}
 
     history = ""
@@ -444,6 +451,7 @@ def _store_capture(
         old = _get_capture(conn, supersedes_id)
         if old is not None:
             supersedes_field = supersedes_id
+            pinned = bool(pinned) or bool(old["pinned"])  # an update of a pinned fact stays pinned
             old_history = old["history"] or ""
             date_str = datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d")
             new_line = f"[{date_str}] {old['content']}"
