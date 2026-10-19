@@ -162,7 +162,7 @@ Every key below is set in `config.yaml` under the `memory.memohood.` prefix, e.g
 | `gate.model2vec_model` | string | `minishlab/potion-base-8M` | Static embedding model used by the gate |
 | `gate.meaningful_terms_floor` | int | `3` | If the query has this many meaningful words or more, recall immediately, no embedding needed |
 | `model.provider` | string | `gemini` | LLM provider used for borderline fact extraction and nightly consolidation |
-| `model.model` | string | `gemini-3.1-flash-lite` | The specific model used for extraction and consolidation |
+| `model.model` | string | `gemini-flash-lite-latest` | The specific model used for extraction and consolidation |
 | `embedder.provider` | string | `cloudflare` | Embedding provider for the vector search leg |
 | `embedder.model` | string | `@cf/baai/bge-m3` | Embedding model |
 | `embedder.dims` | int | `1024` | Vector dimensionality |

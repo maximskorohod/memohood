@@ -163,7 +163,7 @@ class TestModelThreadedFromCallSites:
 
 class TestDefaultModelInvariant:
     def test_default_model_is_the_expected_bumped_value(self, memohood):
-        assert memohood.extract_llm.DEFAULT_MODEL == "gemini-3.1-flash-lite"
+        assert memohood.extract_llm.DEFAULT_MODEL == "gemini-flash-lite-latest"
 
     def test_default_model_matches_config_defaults(self, memohood):
         assert memohood.extract_llm.DEFAULT_MODEL == memohood.config.DEFAULTS["model"]["model"]

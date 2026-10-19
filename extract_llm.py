@@ -79,7 +79,7 @@ from ._engine.security import DEFAULT_USER_AGENT, fence_untrusted, scan_secrets
 logger = logging.getLogger("memohood.extract_llm")
 
 GEMINI_OPENAI_COMPAT_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-DEFAULT_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_MODEL = "gemini-flash-lite-latest"
 DEFAULT_TIMEOUT_S = 20.0
 MAX_RETRIES = 3
 _RETRYABLE_STATUS = (429, 500, 502, 503, 504)

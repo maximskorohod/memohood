@@ -162,7 +162,7 @@ hermes memohood status
 | `gate.model2vec_model` | string | `minishlab/potion-base-8M` | Статическая embedding-модель для гейта |
 | `gate.meaningful_terms_floor` | int | `3` | Если в запросе столько значимых слов и больше — вспоминаем сразу, без эмбеддинга |
 | `model.provider` | string | `gemini` | Провайдер LLM для спорной экстракции фактов и ночной консолидации |
-| `model.model` | string | `gemini-3.1-flash-lite` | Конкретная модель для экстракции и консолидации |
+| `model.model` | string | `gemini-flash-lite-latest` | Конкретная модель для экстракции и консолидации |
 | `embedder.provider` | string | `cloudflare` | Провайдер эмбеддингов для векторного поиска |
 | `embedder.model` | string | `@cf/baai/bge-m3` | Модель эмбеддингов |
 | `embedder.dims` | int | `1024` | Размерность вектора |

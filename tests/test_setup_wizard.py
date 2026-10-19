@@ -588,11 +588,11 @@ class TestB6GeminiModelDiscovery:
                 return {
                     "models": [
                         {
-                            "name": "models/gemini-2.5-flash-lite",
+                            "name": "models/gemini-flash-lite-latest",
                             "supportedGenerationMethods": ["generateContent"],
                         },
                         {
-                            "name": "models/gemini-2.5-pro",
+                            "name": "models/gemini-3.5-flash-lite",
                             "supportedGenerationMethods": ["generateContent", "countTokens"],
                         },
                         {
@@ -612,7 +612,7 @@ class TestB6GeminiModelDiscovery:
 
         models = sw.discover_gemini_models("fake-gemini-key")
 
-        assert models == ["gemini-2.5-flash-lite", "gemini-2.5-pro"]
+        assert models == ["gemini-flash-lite-latest", "gemini-3.5-flash-lite"]
         assert "fake-gemini-key" in captured["url"]
 
     def test_discover_gemini_models_never_raises_on_network_failure(self, memohood, monkeypatch):
@@ -640,7 +640,7 @@ class TestB6GeminiModelDiscovery:
         monkeypatch.setattr(
             sw,
             "discover_gemini_models",
-            lambda key: ["gemini-2.5-flash-lite", "gemini-2.5-pro"],
+            lambda key: ["gemini-flash-lite-latest", "gemini-3.5-flash-lite"],
         )
 
         gemini_key = "AIzaFAKE" + "0" * 31
@@ -652,14 +652,14 @@ class TestB6GeminiModelDiscovery:
                     "",          # шаг 2: пропуск Cohere
                     gemini_key,  # шаг 3: ключ Gemini
                     "",          # Enter = проверить
-                    "2",         # выбор модели: gemini-2.5-pro (не дефолт)
+                    "2",         # выбор модели: gemini-3.5-flash-lite (не дефолт)
                 ]
             ),
         )
 
         out = capsys.readouterr().out
-        assert "gemini-2.5-flash-lite" in out
-        assert "gemini-2.5-pro" in out
+        assert "gemini-flash-lite-latest" in out
+        assert "gemini-3.5-flash-lite" in out
 
         config_path = home / "config.yaml"
         assert config_path.exists()
@@ -667,7 +667,7 @@ class TestB6GeminiModelDiscovery:
         import yaml
 
         cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        assert cfg["memory"]["memohood"]["model"]["model"] == "gemini-2.5-pro"
+        assert cfg["memory"]["memohood"]["model"]["model"] == "gemini-3.5-flash-lite"
 
         # Секрет не попадает в config.yaml.
         assert gemini_key not in config_path.read_text(encoding="utf-8")
