@@ -57,6 +57,55 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# --- Dependencies in the environment hermes actually runs ------------------
+# plugin.yaml's pip_dependencies are built into the managed env only on
+# `hermes update`; right after a fresh install they are missing, and memory
+# silently degrades (no vector search, no RU stemming). So: ask hermes for its
+# site-packages, check every module, install what's missing with hermes' own
+# uv. Args: "<label>" then "module:pip-spec" pairs. Never fails the install.
+ensure_runtime_deps() {
+    local label="$1"; shift
+    local sp venv py uv missing pkgs pair
+    sp="$(hermes --run-module site 2>/dev/null | grep -i "site-packages" | grep -iE "venv" | head -1 \
+        | sed -E "s/^[[:space:]]*'//; s/',?[[:space:]]*$//")"
+    venv="$(printf '%s' "$sp" | sed -E 's#(.*[/\\]venv)[/\\].*#\1#')"
+    py=""
+    for cand in "$venv/bin/python" "$venv/Scripts/python.exe"; do
+        [ -n "$venv" ] && [ -x "$cand" ] && { py="$cand"; break; }
+    done
+    if [ -z "$py" ]; then
+        echo "$label: не нашёл окружение hermes — проверьте пакеты сами: hermes memory setup"
+        return 0
+    fi
+    _missing() {
+        local out="" pair
+        for pair in "$@"; do
+            "$py" -c "import importlib.util,sys; sys.exit(importlib.util.find_spec('${pair%%:*}') is None)" 2>/dev/null \
+                || out="$out ${pair#*:}"
+        done
+        printf '%s' "$out"
+    }
+    missing="$(_missing "$@")"
+    if [ -z "$missing" ]; then
+        echo "$label: все пакеты на месте"
+        return 0
+    fi
+    echo "$label: не хватает пакетов:$missing — ставлю в $py"
+    uv="$(ls -d "${HERMES_HOME:-$HOME/.hermes}"/tools/uv-*/uv* 2>/dev/null | head -1)"
+    # shellcheck disable=SC2086
+    if [ -n "$uv" ]; then
+        "$uv" pip install -q --python "$py" $missing || true
+    else
+        "$py" -m pip install -q $missing || true
+    fi
+    missing="$(_missing "$@")"
+    if [ -z "$missing" ]; then
+        echo "$label: пакеты установлены"
+    else
+        echo "$label: ВНИМАНИЕ, не встали:$missing — память работает урезанно"
+    fi
+}
+
 # --- hermes >= 0.22: package-manager install -------------------------------
 # `hermes` is now a launcher for a bundled Python whose environment is rebuilt
 # by `hermes pm` on every update; packages pip-installed into it (or into the
@@ -79,13 +128,14 @@ if command -v hermes >/dev/null 2>&1 && hermes --print-runtime-command >/dev/nul
         hermes config set memory.provider memohood >/dev/null
         echo "MemoHood: memory.provider = memohood"
     fi
+    ensure_runtime_deps "MemoHood" sqlite_vec:sqlite-vec Stemmer:PyStemmer ftfy:ftfy requests:requests yaml:PyYAML
     if [ "$INSTALL_LOCAL" = "1" ]; then
         echo "MemoHood: --local на hermes 0.22+ пока не поддержан установщиком (fastembed нельзя"
         echo "  поставить pip'ом в управляемое окружение). Используйте Cloudflare-эмбеддинги."
     fi
     echo ""
     echo "Готово. Дальше:"
-    echo "  hermes memory setup memohood   # зависимости через пакетный менеджер hermes + ключи"
+    echo "  hermes memory setup memohood   # ключи"
     echo "  hermes gateway restart         # если работает гейтвей"
     echo "  hermes memohood status"
     exit 0
