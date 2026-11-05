@@ -214,17 +214,17 @@ def _atomic_write_private(path: Path, text: str) -> None:
 # Resume checkpoint (B10): step-completion flags ONLY, next to .env.
 # NEVER holds key values -- secrets live exclusively in .env (see module
 # docstring / the project's secrets rule); this file just remembers WHICH of
-# the three key-collecting steps already ran, so a wizard interrupted by
-# EOFError/KeyboardInterrupt (B4) doesn't re-ask questions the operator
-# already answered on a previous run.
+# the three key-collecting steps already saved a key, so a wizard interrupted
+# by EOFError/KeyboardInterrupt (B4) doesn't re-ask for keys the operator
+# already gave on a previous run. A skipped step saved nothing, so it stays
+# out of the list and is offered again on resume.
 # ---------------------------------------------------------------------------
 
 PARTIAL_SETUP_FILENAME = ".memohood-setup.partial.json"
 
-# "dependencies" is deliberately NOT in here: it has no prompts and is cheap
-# enough to re-run fresh every time -- this checkpoint exists to avoid
-# re-ASKING already-answered questions, not to skip a free instant check.
-RESUMABLE_STEPS: Tuple[str, ...] = ("cloudflare", "cohere", "gemini")
+# "dependencies" is deliberately never checkpointed: it has no prompts and is
+# cheap enough to re-run fresh every time -- this checkpoint exists to avoid
+# re-ASKING for saved keys, not to skip a free instant check.
 
 # Human-readable labels for the "уже готово: ..." resume message only.
 _STEP_LABELS: Dict[str, str] = {
@@ -827,6 +827,10 @@ def _run(hermes_home: Optional[str], input_fn) -> None:
         print(f"Найден незавершённый предыдущий запуск. Уже готово: {labels}.")
         if not _yes(input_fn, "Продолжить и пропустить готовые шаги? (Enter = да / n = начать заново): "):
             steps_done = []
+            # A restart that skips every step never saves a new checkpoint,
+            # so the old one has to go now or it would resurface after an
+            # interrupt.
+            clear_setup_checkpoint(partial_path)
 
     to_write: Dict[str, str] = {}
     summary: List[Tuple[str, str]] = []
@@ -841,8 +845,8 @@ def _run(hermes_home: Optional[str], input_fn) -> None:
             if values:  # B4: write THIS step's keys immediately, don't batch until the end
                 print()
                 _write_step_values(env_path, values)
-            steps_done.append("cloudflare")
-            save_setup_checkpoint(partial_path, steps_done)
+                steps_done.append("cloudflare")
+                save_setup_checkpoint(partial_path, steps_done)
 
         if "cohere" in steps_done:
             summary.append(("Cohere (реранк)", "уже настроено ранее -- пропущено при возобновлении"))
@@ -853,8 +857,8 @@ def _run(hermes_home: Optional[str], input_fn) -> None:
             if values:
                 print()
                 _write_step_values(env_path, values)
-            steps_done.append("cohere")
-            save_setup_checkpoint(partial_path, steps_done)
+                steps_done.append("cohere")
+                save_setup_checkpoint(partial_path, steps_done)
 
         if "gemini" in steps_done:
             summary.append(("Gemini (факты)", "уже настроено ранее -- пропущено при возобновлении"))
@@ -865,14 +869,14 @@ def _run(hermes_home: Optional[str], input_fn) -> None:
             if values:
                 print()
                 _write_step_values(env_path, values)
-            # Mark "gemini" done (key already safely in .env) BEFORE the
-            # optional model-choice prompt below, so an EOFError/
-            # KeyboardInterrupt during model selection still lets a resumed
-            # run skip re-asking the key it already has.
-            steps_done.append("gemini")
-            save_setup_checkpoint(partial_path, steps_done)
+                # Mark "gemini" done (key already safely in .env) BEFORE the
+                # optional model-choice prompt below, so an EOFError/
+                # KeyboardInterrupt during model selection still lets a resumed
+                # run skip re-asking the key it already has.
+                steps_done.append("gemini")
+                save_setup_checkpoint(partial_path, steps_done)
 
-            if values:  # B6: only worth discovering a model if we HAVE a key
+                # B6: only worth discovering a model if we HAVE a key
                 chosen_model = _step_gemini_model(input_fn, values["GEMINI_API_KEY"])
                 if chosen_model != GEMINI_MODEL:
                     try:
@@ -886,8 +890,9 @@ def _run(hermes_home: Optional[str], input_fn) -> None:
         _missing, deps_status = _step_dependencies()
         summary.append(("Зависимости", deps_status))
 
-        if all(step in steps_done for step in RESUMABLE_STEPS):
-            clear_setup_checkpoint(partial_path)
+        # Every step has been answered or skipped, so nothing is left to
+        # resume, even if a skipped step never made it into steps_done.
+        clear_setup_checkpoint(partial_path)
     except (EOFError, KeyboardInterrupt):
         # Belt-and-suspenders (B4): every step above already writes its OWN
         # keys to .env the moment it completes, so `to_write` here normally
