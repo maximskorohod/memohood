@@ -568,6 +568,103 @@ class TestB10ResumeCheckpoint:
 
         assert not (home / ".memohood-setup.partial.json").exists()
 
+    def test_skipped_step_is_not_checkpointed(self, memohood, capsys):
+        """Issue #2: Enter on Cloudflare, then an interrupt at Cohere. Nothing
+        was saved, so the next run must not claim Cloudflare is ready."""
+        sw = _wizard(memohood)
+        home = memohood._hermes_home_for_test
+        partial = home / ".memohood-setup.partial.json"
+        answers = iter([""])
+
+        def input_fn(prompt):
+            try:
+                return next(answers)
+            except StopIteration:
+                raise EOFError
+
+        sw.run_wizard(hermes_home=str(home), input_fn=input_fn)
+        assert not partial.exists()
+        capsys.readouterr()
+
+        sw.run_wizard(hermes_home=str(home), input_fn=_feed(["", "", ""]))
+
+        out = capsys.readouterr().out
+        assert "Уже готово" not in out
+        assert "уже настроено ранее" not in out
+
+    def test_declined_failed_check_is_not_checkpointed(self, memohood, monkeypatch):
+        """A key that failed its live check and was not kept never reached
+        .env, so its step must stay out of the checkpoint."""
+        sw = _wizard(memohood)
+        home = memohood._hermes_home_for_test
+        monkeypatch.setattr(sw, "check_cloudflare", lambda a, t: (False, "bad"))
+        monkeypatch.setattr(sw, "check_cohere", lambda k: (True, "ok"))
+        answers = iter(
+            [
+                "0123456789abcdef0123456789abcdef", "cf-token-FAKE", "", "",  # шаг 1: проверка упала, не сохраняем
+                "co-FAKE-key", "",                                            # шаг 2
+            ]
+        )
+
+        def input_fn(prompt):
+            try:
+                return next(answers)
+            except StopIteration:
+                raise EOFError
+
+        sw.run_wizard(hermes_home=str(home), input_fn=input_fn)
+
+        data = json.loads((home / ".memohood-setup.partial.json").read_text(encoding="utf-8"))
+        assert data == {"steps_done": ["cohere"]}
+
+    def test_resume_reasks_skipped_step_and_skips_saved_one(self, memohood, monkeypatch):
+        """On resume only the step with a saved key is passed over; the run
+        then finishes, so the checkpoint is removed even with skips."""
+        sw = _wizard(memohood)
+        home = memohood._hermes_home_for_test
+        partial = home / ".memohood-setup.partial.json"
+        partial.write_text('{"steps_done": ["cohere"]}', encoding="utf-8")
+        monkeypatch.setattr(sw, "check_cohere", _fail_if_called)
+        prompts = []
+        answers = iter(["", "", ""])  # возобновить, пропуск Cloudflare, пропуск Gemini
+
+        def input_fn(prompt):
+            prompts.append(prompt)
+            return next(answers)
+
+        sw.run_wizard(hermes_home=str(home), input_fn=input_fn)
+
+        assert any("Cloudflare ACCOUNT_ID" in p for p in prompts)
+        assert not any("Cohere" in p for p in prompts)
+        assert not partial.exists()
+
+    def test_run_with_only_skips_leaves_no_checkpoint(self, memohood):
+        sw = _wizard(memohood)
+        home = memohood._hermes_home_for_test
+
+        sw.run_wizard(hermes_home=str(home), input_fn=_feed(["", "", ""]))
+
+        assert not (home / ".memohood-setup.partial.json").exists()
+
+    def test_restart_drops_old_checkpoint_even_if_nothing_is_saved(self, memohood, capsys):
+        """Answering "n" to resume, skipping, then interrupting must not bring
+        the old checkpoint back on the next run."""
+        sw = _wizard(memohood)
+        home = memohood._hermes_home_for_test
+        partial = home / ".memohood-setup.partial.json"
+        partial.write_text('{"steps_done": ["cloudflare"]}', encoding="utf-8")
+        answers = iter(["n", ""])  # начать заново, пропуск Cloudflare, затем прерывание
+
+        def input_fn(prompt):
+            try:
+                return next(answers)
+            except StopIteration:
+                raise EOFError
+
+        sw.run_wizard(hermes_home=str(home), input_fn=input_fn)
+
+        assert not partial.exists()
+
 
 # ---------------------------------------------------------------------------
 # B6: Gemini model auto-discovery (ListModels) after the key step.
